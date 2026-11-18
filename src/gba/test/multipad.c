@@ -7,9 +7,12 @@
 
 #include <mgba/core/core.h>
 #include <mgba/core/config.h>
+#include <mgba/core/input.h>
+#include <mgba-util/configuration.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/arm/arm.h>
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/input.h>
 #include <mgba/internal/gba/multipad.h>
 #include <mgba/internal/gba/sio/lockstep.h>
 
@@ -195,7 +198,124 @@ M_TEST_DEFINE(linkPlayIsUpstream) {
 	_destroyCore(core2);
 }
 
+// A gamepad-style binding type (the Qt frontend uses SDL GameController ids,
+// type 'SDLC'). Button and axis ids below follow the SDL GameController enum.
+#define PAD_TYPE 0x53444C43
+enum {
+	PAD_A = 0, PAD_B = 1, PAD_BACK = 4, PAD_START = 6, PAD_LSHOULDER = 9, PAD_RSHOULDER = 10,
+	PAD_UP = 11, PAD_DOWN = 12, PAD_LEFT = 13, PAD_RIGHT = 14, PAD_BUTTONS = 26
+};
+enum { PAD_LEFTX = 0, PAD_LEFTY = 1, PAD_AXES = 6 };
+
+// What the frontend does for one player each frame: map the pad's buttons and
+// axes through that player's own map into GBA key bits.
+static uint16_t _mapPad(const struct mInputMap* map, const bool* buttons, const int16_t* axes) {
+	uint16_t keys = 0;
+	int i;
+	for (i = 0; i < PAD_BUTTONS; ++i) {
+		if (!buttons[i]) {
+			continue;
+		}
+		int key = mInputMapKey(map, PAD_TYPE, i);
+		if (key >= 0) {
+			keys |= 1 << key;
+		}
+	}
+	for (i = 0; i < PAD_AXES; ++i) {
+		int key = mInputMapAxis(map, PAD_TYPE, i, axes[i]);
+		if (key >= 0) {
+			keys |= 1 << key;
+		}
+	}
+	return keys;
+}
+
+M_TEST_DEFINE(secondPadFeedsPlayer2) {
+	struct mCore* core = _createCore();
+	_setOption(core, "multiController", true);
+
+	// Player 2's own bindings, loaded from its own config section like the
+	// frontend does ("gba.p2.input.SDLC"), with a layout that differs from
+	// player 1's (A and B swapped) so a mix-up would show
+	struct mInputPlatformInfo info = GBAInputInfo;
+	info.platformName = "gba.p2";
+	struct Configuration config;
+	ConfigurationInit(&config);
+	const char* section = "gba.p2.input.SDLC";
+	ConfigurationSetIntValue(&config, section, "keyA", PAD_A);
+	ConfigurationSetIntValue(&config, section, "keyB", PAD_B);
+	ConfigurationSetIntValue(&config, section, "keySelect", PAD_BACK);
+	ConfigurationSetIntValue(&config, section, "keyStart", PAD_START);
+	ConfigurationSetIntValue(&config, section, "keyL", PAD_LSHOULDER);
+	ConfigurationSetIntValue(&config, section, "keyR", PAD_RSHOULDER);
+	ConfigurationSetIntValue(&config, section, "keyUp", PAD_UP);
+	ConfigurationSetIntValue(&config, section, "keyDown", PAD_DOWN);
+	ConfigurationSetIntValue(&config, section, "keyLeft", PAD_LEFT);
+	ConfigurationSetIntValue(&config, section, "keyRight", PAD_RIGHT);
+	ConfigurationSetValue(&config, section, "axisLeftAxis", "-0");
+	ConfigurationSetIntValue(&config, section, "axisLeftValue", -12288);
+	ConfigurationSetValue(&config, section, "axisRightAxis", "+0");
+	ConfigurationSetIntValue(&config, section, "axisRightValue", 12288);
+	ConfigurationSetValue(&config, section, "axisUpAxis", "-1");
+	ConfigurationSetIntValue(&config, section, "axisUpValue", -12288);
+	ConfigurationSetValue(&config, section, "axisDownAxis", "+1");
+	ConfigurationSetIntValue(&config, section, "axisDownValue", 12288);
+	struct mInputMap map;
+	mInputMapInit(&map, &info);
+	assert_true(mInputMapLoad(&map, PAD_TYPE, &config));
+
+	static const struct {
+		int button;
+		uint16_t key;
+	} buttons[] = {
+		{ PAD_A, 1 << GBA_KEY_A }, { PAD_B, 1 << GBA_KEY_B }, { PAD_BACK, 1 << GBA_KEY_SELECT },
+		{ PAD_START, 1 << GBA_KEY_START }, { PAD_RIGHT, 1 << GBA_KEY_RIGHT }, { PAD_LEFT, 1 << GBA_KEY_LEFT },
+		{ PAD_UP, 1 << GBA_KEY_UP }, { PAD_DOWN, 1 << GBA_KEY_DOWN }, { PAD_RSHOULDER, 1 << GBA_KEY_R },
+		{ PAD_LSHOULDER, 1 << GBA_KEY_L },
+	};
+	bool pad[PAD_BUTTONS] = { false };
+	int16_t axes[PAD_AXES] = { 0 };
+	size_t i;
+	for (i = 0; i < sizeof(buttons) / sizeof(*buttons); ++i) {
+		memset(pad, 0, sizeof(pad));
+		pad[buttons[i].button] = true;
+		GBAMultipadSetKeys(core->board, 2, _mapPad(&map, pad, axes));
+		// The game sees exactly that bit, 1 = pressed, KEYINPUT order
+		assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS)), buttons[i].key);
+		// Player 1's keypad and player 3 are untouched
+		assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS + 2)), 0);
+		assert_int_equal(_load16(core, IO(0x130)), 0x3FF);
+	}
+
+	// Stick as d-pad, beyond the dead zone only
+	memset(pad, 0, sizeof(pad));
+	axes[PAD_LEFTX] = -20000;
+	axes[PAD_LEFTY] = 20000;
+	GBAMultipadSetKeys(core->board, 2, _mapPad(&map, pad, axes));
+	assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS)), (1 << GBA_KEY_LEFT) | (1 << GBA_KEY_DOWN));
+	axes[PAD_LEFTX] = 8000;
+	axes[PAD_LEFTY] = -8000;
+	GBAMultipadSetKeys(core->board, 2, _mapPad(&map, pad, axes));
+	assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS)), 0);
+
+	// Released pad reads 0
+	axes[PAD_LEFTX] = 0;
+	axes[PAD_LEFTY] = 0;
+	GBAMultipadSetKeys(core->board, 2, _mapPad(&map, pad, axes));
+	assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS)), 0);
+
+	// Survives a reset (host state, not emulated state)
+	GBAMultipadSetKeys(core->board, 2, 1 << GBA_KEY_A);
+	core->reset(core);
+	assert_int_equal(_load16(core, IO(GBA_MP_REG_KEYS)), 1 << GBA_KEY_A);
+
+	mInputMapDeinit(&map);
+	ConfigurationDeinit(&config);
+	_destroyCore(core);
+}
+
 M_TEST_SUITE_DEFINE(GBAMultipad,
+	cmocka_unit_test(secondPadFeedsPlayer2),
 	cmocka_unit_test(disabledIsUpstream),
 	cmocka_unit_test(enabledRegisters),
 	cmocka_unit_test(configAtLoad),
