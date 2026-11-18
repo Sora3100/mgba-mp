@@ -24,12 +24,17 @@ class GBAKeyEditor : public QWidget {
 Q_OBJECT
 
 public:
-	GBAKeyEditor(InputController* controller, int type, const QString& profile = QString(), QWidget* parent = nullptr);
+	GBAKeyEditor(InputController* controller, int type, const QString& profile = QString(), QWidget* parent = nullptr, int player = 1);
+
+	int player() const { return m_player; }
 	virtual ~GBAKeyEditor();
 
 public slots:
 	void setAll();
 	void save();
+#ifdef BUILD_SDL
+	void updateJoysticks();
+#endif
 
 protected:
 	virtual void resizeEvent(QResizeEvent*) override;
@@ -43,7 +48,6 @@ private slots:
 	void refresh();
 #ifdef BUILD_SDL
 	void selectGamepad(int index);
-	void updateJoysticks();
 #endif
 
 private:
@@ -85,6 +89,7 @@ private:
 	uint32_t m_type;
 	QString m_profile;
 	InputController* m_controller;
+	int m_player;
 
 	QPicture m_background;
 };

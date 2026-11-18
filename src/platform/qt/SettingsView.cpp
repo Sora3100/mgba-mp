@@ -11,6 +11,7 @@
 #include "ConfigController.h"
 #include "Display.h"
 #include "GBAApp.h"
+#include "ControllersView.h"
 #include "GBAKeyEditor.h"
 #include "InputController.h"
 #include "RotatedHeaderView.h"
@@ -335,17 +336,17 @@ SettingsView::SettingsView(ConfigController* controller, InputController* inputC
 	addPage(tr("Keyboard"), editor, Page::KEYBOARD);
 	connect(m_ui.buttonBox, &QDialogButtonBox::accepted, editor, &GBAKeyEditor::save);
 
-	GBAKeyEditor* buttonEditor = nullptr;
+	ControllersView* buttonEditor = nullptr;
 #ifdef BUILD_SDL
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 	QString profile = inputController->profileForType(SDL_BINDING_CONTROLLER);
-	buttonEditor = new GBAKeyEditor(inputController, SDL_BINDING_CONTROLLER, profile);
+	buttonEditor = new ControllersView(m_controller, inputController, SDL_BINDING_CONTROLLER, profile);
 #else
 	QString profile = inputController->profileForType(SDL_BINDING_BUTTON);
-	buttonEditor = new GBAKeyEditor(inputController, SDL_BINDING_BUTTON, profile);
+	buttonEditor = new ControllersView(m_controller, inputController, SDL_BINDING_BUTTON, profile);
 #endif
 	addPage(tr("Controllers"), buttonEditor, Page::CONTROLLERS);
-	connect(m_ui.buttonBox, &QDialogButtonBox::accepted, buttonEditor, &GBAKeyEditor::save);
+	connect(m_ui.buttonBox, &QDialogButtonBox::accepted, buttonEditor, &ControllersView::save);
 #endif
 
 	connect(m_ui.buttonBox, &QDialogButtonBox::accepted, this, &SettingsView::updateConfig);

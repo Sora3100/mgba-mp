@@ -30,11 +30,12 @@ const qreal GBAKeyEditor::DPAD_CENTER_Y = 0.432;
 const qreal GBAKeyEditor::DPAD_WIDTH = 0.12;
 const qreal GBAKeyEditor::DPAD_HEIGHT = 0.12;
 
-GBAKeyEditor::GBAKeyEditor(InputController* controller, int type, const QString& profile, QWidget* parent)
+GBAKeyEditor::GBAKeyEditor(InputController* controller, int type, const QString& profile, QWidget* parent, int player)
 	: QWidget(parent)
 	, m_type(type)
 	, m_profile(profile)
 	, m_controller(controller)
+	, m_player(player)
 {
 	setWindowFlags(windowFlags() & ~Qt::WindowFullscreenButtonHint);
 	setMinimumSize(300, 300);
@@ -179,8 +180,15 @@ bool GBAKeyEditor::event(QEvent* event) {
 	QEvent::Type type = event->type();
 	if (type == QEvent::WindowActivate || type == QEvent::Show) {
 		m_controller->stealFocus(this);
+		if (m_type != InputController::KEYBOARD) {
+			// Binding events come from the pad of the player being edited
+			m_controller->setEventPlayer(m_player);
+		}
 	} else if (type == QEvent::WindowDeactivate || type == QEvent::Hide) {
 		m_controller->releaseFocus(this);
+		if (m_type != InputController::KEYBOARD && m_controller->eventPlayer() == m_player) {
+			m_controller->setEventPlayer(1);
+		}
 	}
 	return QWidget::event(event);
 }
@@ -218,7 +226,7 @@ void GBAKeyEditor::setNext() {
 
 void GBAKeyEditor::save() {
 #ifdef BUILD_SDL
-	InputMapper mapper = m_controller->mapper(m_type);
+	InputMapper mapper = m_controller->playerMapper(m_player, m_type);
 	mapper.unbindAllAxes();
 	mapper.unbindAllHats();
 #endif
@@ -233,6 +241,12 @@ void GBAKeyEditor::save() {
 	bindKey(m_keyB, GBA_KEY_B);
 	bindKey(m_keyL, GBA_KEY_L);
 	bindKey(m_keyR, GBA_KEY_R);
+	if (m_player > 1) {
+		// Players 2..8 keep their bindings in their own sections. Their pad
+		// follows the plug-in slot order, so no preferred device is stored.
+		m_controller->savePlayerConfiguration(m_player, m_type);
+		return;
+	}
 	m_controller->saveConfiguration(m_type);
 
 #ifdef BUILD_SDL
@@ -247,7 +261,7 @@ void GBAKeyEditor::save() {
 }
 
 void GBAKeyEditor::refresh() {
-	const mInputMap* map = m_controller->map();
+	const mInputMap* map = m_controller->playerMap(m_player);
 	lookupBinding(map, m_keyDU, GBA_KEY_UP);
 	lookupBinding(map, m_keyDD, GBA_KEY_DOWN);
 	lookupBinding(map, m_keyDL, GBA_KEY_LEFT);
@@ -329,7 +343,7 @@ void GBAKeyEditor::lookupHats(const mInputMap* map) {
 #endif
 
 void GBAKeyEditor::bindKey(const KeyEditor* keyEditor, int key) {
-	InputMapper mapper = m_controller->mapper(m_type);
+	InputMapper mapper = m_controller->playerMapper(m_player, m_type);
 #ifdef BUILD_SDL
 	if ((m_type == SDL_BINDING_BUTTON || m_type == SDL_BINDING_CONTROLLER) && keyEditor->axis() >= 0) {
 		mapper.bindAxis(keyEditor->axis(), keyEditor->direction(), key);
@@ -357,6 +371,11 @@ bool GBAKeyEditor::findFocus(KeyEditor* needle) {
 
 #ifdef BUILD_SDL
 void GBAKeyEditor::selectGamepad(int index) {
+	if (m_player > 1) {
+		m_controller->setPlayerGamepad(m_player, m_type, index);
+		refresh();
+		return;
+	}
 	m_controller->setGamepad(m_type, index);
 	m_profile = m_profileSelect->currentText();
 	m_controller->loadProfile(m_type, m_profile);
@@ -407,7 +426,7 @@ void GBAKeyEditor::updateJoysticks() {
 	auto wasBlocked = m_profileSelect->blockSignals(true);
 	m_profileSelect->clear();
 	m_profileSelect->addItems(m_controller->connectedGamepads(m_type));
-	int activeGamepad = m_controller->gamepadIndex(m_type);
+	int activeGamepad = m_player > 1 ? m_controller->playerGamepadIndex(m_player, m_type) : m_controller->gamepadIndex(m_type);
 	m_profileSelect->setCurrentIndex(activeGamepad);
 	m_profileSelect->blockSignals(wasBlocked);
 

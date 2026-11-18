@@ -113,11 +113,13 @@ set(SOURCE_FILES
 	CheckBoxDelegate.cpp
 	ConfigController.cpp
 	ColorPicker.cpp
+	ControllersView.cpp
 	CoreManager.cpp
 	CoreController.cpp
 	Display.cpp
 	DisplayGL.cpp
 	DisplayQt.cpp
+	ExtendedKeyEditor.cpp
 	ForwarderController.cpp
 	ForwarderGenerator.cpp
 	ForwarderGenerator3DS.cpp
