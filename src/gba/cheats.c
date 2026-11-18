@@ -56,6 +56,7 @@ static struct mCheatSet* GBACheatSetCreate(struct mCheatDevice* device, const ch
 	set->cbMaster = 0;
 	set->remainingAddresses = 0;
 	set->hook = NULL;
+	set->nAllocs = 0;
 
 	set->d.deinit = GBACheatSetDeinit;
 	set->d.add = GBACheatAddSet;
@@ -92,11 +93,116 @@ static void GBACheatSetDeinit(struct mCheatSet* set) {
 static void GBACheatAddSet(struct mCheatSet* cheats, struct mCheatDevice* device) {
 	struct GBACheatSet* gbaset = (struct GBACheatSet*) cheats;
 	_addBreakpoint(device, gbaset);
+	GBACheatSyncAllocations(device);
 }
 
 static void GBACheatRemoveSet(struct mCheatSet* cheats, struct mCheatDevice* device) {
 	struct GBACheatSet* gbaset = (struct GBACheatSet*) cheats;
 	_removeBreakpoint(device, gbaset);
+	GBACheatSyncAllocations(device);
+}
+
+static const char* _skipSpace(const char* str) {
+	while (isspace((int) str[0])) {
+		++str;
+	}
+	return str;
+}
+
+static const char* _parseAllocNumber(const char* str, uint32_t* out) {
+	str = _skipSpace(str);
+	if (str[0] == '0' && (str[1] == 'x' || str[1] == 'X')) {
+		str += 2;
+	}
+	if (!isxdigit((int) str[0])) {
+		return NULL;
+	}
+	char* end;
+	unsigned long value = strtoul(str, &end, 16);
+	if (value > 0xFFFFFFFFUL) {
+		return NULL;
+	}
+	*out = value;
+	return end;
+}
+
+// Syntax: "alloc <address> <size>", both in hex (optional 0x prefix)
+bool GBACheatAddAllocLine(struct GBACheatSet* cheats, const char* line) {
+	line = _skipSpace(line);
+	if (strncasecmp(line, "alloc", 5) != 0 || !isspace((int) line[5])) {
+		return false;
+	}
+	uint32_t base;
+	uint32_t size;
+	uint32_t aligned;
+	line = _parseAllocNumber(&line[5], &base);
+	if (!line || !isspace((int) line[0])) {
+		return false;
+	}
+	line = _parseAllocNumber(line, &size);
+	if (!line || _skipSpace(line)[0]) {
+		return false;
+	}
+	if (!GBACheatRAMValidate(base, size, &aligned)) {
+		return false;
+	}
+	size_t i;
+	for (i = 0; i < cheats->nAllocs; ++i) {
+		if (cheats->allocs[i].base == base && cheats->allocs[i].size == aligned) {
+			return true;
+		}
+	}
+	if (cheats->nAllocs >= GBA_CHEAT_RAM_MAX_BLOCKS) {
+		return false;
+	}
+	cheats->allocs[cheats->nAllocs].base = base;
+	cheats->allocs[cheats->nAllocs].size = aligned;
+	++cheats->nAllocs;
+	return true;
+}
+
+static bool _allocWanted(struct mCheatDevice* device, uint32_t base, uint32_t size) {
+	size_t s;
+	for (s = 0; s < mCheatSetsSize(&device->cheats); ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		if (!set->d.enabled) {
+			continue;
+		}
+		size_t i;
+		for (i = 0; i < set->nAllocs; ++i) {
+			if (set->allocs[i].base == base && set->allocs[i].size == size) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Makes the mapped cheat RAM match the allocations of the enabled sets:
+// blocks nobody asks for any more are unmapped (back to open bus), new ones
+// are mapped zero-filled (or with contents from a loaded savestate)
+void GBACheatSyncAllocations(struct mCheatDevice* device) {
+	if (!device->p || device->p->platform(device->p) != mPLATFORM_GBA) {
+		return;
+	}
+	struct GBA* gba = device->p->board;
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		struct GBACheatRAMBlock* block = &gba->memory.cheatRam[i];
+		if (block->data && !_allocWanted(device, block->base, block->size)) {
+			GBAMemoryUnmapCheatRAM(gba, block->base, block->size);
+		}
+	}
+	size_t s;
+	for (s = 0; s < mCheatSetsSize(&device->cheats); ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		if (!set->d.enabled) {
+			continue;
+		}
+		for (i = 0; i < set->nAllocs; ++i) {
+			GBAMemoryMapCheatRAM(gba, set->allocs[i].base, set->allocs[i].size);
+		}
+	}
 }
 
 static bool GBACheatAddAutodetect(struct GBACheatSet* set, uint32_t op1, uint32_t op2) {
@@ -204,6 +310,9 @@ bool GBACheatAddVBALine(struct GBACheatSet* cheats, const char* line) {
 
 bool GBACheatAddLine(struct mCheatSet* set, const char* line, int type) {
 	struct GBACheatSet* cheats = (struct GBACheatSet*) set;
+	if (strncasecmp(_skipSpace(line), "alloc", 5) == 0) {
+		return GBACheatAddAllocLine(cheats, line);
+	}
 	switch (type) {
 	case GBA_CHEAT_AUTODETECT:
 		break;
@@ -254,6 +363,10 @@ static void GBACheatRefresh(struct mCheatSet* cheats, struct mCheatDevice* devic
 	if (cheats->enabled && gbaset->hook && !gbaset->hook->reentries) {
 		_addBreakpoint(device, gbaset);
 	}
+	// Once per frame (from the first set) is enough to follow enable/disable
+	if (mCheatSetsSize(&device->cheats) && *mCheatSetsGetPointer(&device->cheats, 0) == cheats) {
+		GBACheatSyncAllocations(device);
+	}
 }
 
 static void GBACheatSetCopyProperties(struct mCheatSet* set, struct mCheatSet* oldSet) {
@@ -296,6 +409,13 @@ static void GBACheatParseDirectives(struct mCheatSet* set, const struct StringLi
 		}
 		if (strcmp(directive, "PARv3 raw") == 0) {
 			GBACheatSetGameSharkVersion(cheats, GBA_GS_PARV3_RAW);
+			continue;
+		}
+		// "!alloc <address> <size>" applies to every following set until
+		// "!reset"; it is stored as an "alloc" line so saving keeps it
+		size_t before = cheats->nAllocs;
+		if (GBACheatAddAllocLine(cheats, directive) && cheats->nAllocs != before) {
+			*StringListAppend(&set->lines) = strdup(directive);
 			continue;
 		}
 	}

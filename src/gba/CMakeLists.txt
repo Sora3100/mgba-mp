@@ -48,6 +48,7 @@ set(DEBUGGER_FILES
 	debugger/cli.c)
 
 set(TEST_FILES
+	test/cheatram.c
 	test/cheats.c
 	test/core.c
 	test/multipad.c)

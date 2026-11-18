@@ -32,6 +32,17 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t region);
 static int32_t GBAMemoryStall(struct ARMCore* cpu, int32_t wait);
 static int32_t GBAMemoryStallVRAM(struct GBA* gba, int32_t wait, int extra);
 
+static inline struct GBACheatRAMBlock* _cheatRamLookup(struct GBAMemory* memory, uint32_t address) {
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		struct GBACheatRAMBlock* block = &memory->cheatRam[i];
+		if (block->data && address - block->base < block->size) {
+			return block;
+		}
+	}
+	return NULL;
+}
+
 static const char GBA_BASE_WAITSTATES[16] = { 0, 0, 2, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4 };
 static const char GBA_BASE_WAITSTATES_32[16] = { 0, 0, 5, 0, 0, 1, 1, 0, 7, 7, 9, 9, 13, 13, 9 };
 static const char GBA_BASE_WAITSTATES_SEQ[16] = { 0, 0, 2, 0, 0, 0, 0, 0, 2, 2, 4, 4, 8, 8, 4 };
@@ -99,6 +110,8 @@ void GBAMemoryInit(struct GBA* gba) {
 	gba->memory.ereader.p = gba;
 	gba->memory.ereader.dots = NULL;
 	memset(gba->memory.ereader.cards, 0, sizeof(gba->memory.ereader.cards));
+	memset(gba->memory.cheatRam, 0, sizeof(gba->memory.cheatRam));
+	memset(gba->memory.cheatRamPending, 0, sizeof(gba->memory.cheatRamPending));
 }
 
 void GBAMemoryDeinit(struct GBA* gba) {
@@ -114,11 +127,19 @@ void GBAMemoryDeinit(struct GBA* gba) {
 	}
 
 	GBACartEReaderDeinit(&gba->memory.ereader);
+	GBAMemoryClearCheatRAM(gba);
 }
 
 void GBAMemoryReset(struct GBA* gba) {
 	if (gba->memory.wram && gba->memory.rom) {
 		memset(gba->memory.wram, 0, GBA_SIZE_EWRAM);
+	}
+
+	size_t cheatBlock;
+	for (cheatBlock = 0; cheatBlock < GBA_CHEAT_RAM_MAX_BLOCKS; ++cheatBlock) {
+		if (gba->memory.cheatRam[cheatBlock].data) {
+			memset(gba->memory.cheatRam[cheatBlock].data, 0, gba->memory.cheatRam[cheatBlock].size);
+		}
 	}
 
 	if (gba->memory.iwram) {
@@ -284,7 +305,7 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 
 	gba->lastJump = address;
 	memory->lastPrefetchedPc = 0;
-	if (newRegion == memory->activeRegion) {
+	if (newRegion == memory->activeRegion && newRegion != GBA_REGION_CHEAT_RAM) {
 		if (cpu->cpsr.t) {
 			cpu->memory.activeMask |= WORD_SIZE_THUMB;
 		} else {
@@ -300,6 +321,16 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 	}
 	memory->activeRegion = newRegion;
 	switch (newRegion) {
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (!block) {
+			goto invalidRegion;
+		}
+		cpu->memory.accessSource = mACCESS_PROGRAM;
+		cpu->memory.activeRegion = (uint32_t*) block->data;
+		cpu->memory.activeMask = block->size - 1;
+		break;
+	}
 	case GBA_REGION_BIOS:
 		cpu->memory.accessSource = mACCESS_SYSTEM;
 		cpu->memory.activeRegion = memory->bios;
@@ -354,6 +385,7 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 		}
 	// Fall through
 	default:
+	invalidRegion:
 		cpu->memory.accessSource = mACCESS_UNKNOWN;
 		memory->activeRegion = -1;
 		cpu->memory.activeRegion = (uint32_t*) _deadbeef;
@@ -440,6 +472,17 @@ static void GBASetActiveRegion(struct ARMCore* cpu, uint32_t address) {
 	value |= value << 8; \
 	value |= value << 16;
 
+#define LOAD_CHEAT_RAM \
+	{ \
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address); \
+		if (block) { \
+			LOAD_32(value, address & (block->size - 4), block->data); \
+		} else { \
+			mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load32: 0x%08X", address); \
+			LOAD_BAD; \
+		} \
+	}
+
 uint32_t GBALoadBad(struct ARMCore* cpu) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 	uint32_t value = 0;
@@ -513,6 +556,9 @@ uint32_t GBALoad32(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 	case GBA_REGION_SRAM:
 	case GBA_REGION_SRAM_MIRROR:
 		LOAD_SRAM;
+		break;
+	case GBA_REGION_CHEAT_RAM:
+		LOAD_CHEAT_RAM;
 		break;
 	default:
 		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load32: 0x%08X", address);
@@ -629,6 +675,16 @@ uint32_t GBALoad16(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 		value = GBALoad8(cpu, address, 0);
 		value |= value << 8;
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			LOAD_16(value, address & (block->size - 2), block->data);
+			break;
+		}
+		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load16: 0x%08X", address);
+		value = (GBALoadBad(cpu) >> ((address & 2) * 8)) & 0xFFFF;
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load16: 0x%08X", address);
 		value = (GBALoadBad(cpu) >> ((address & 2) * 8)) & 0xFFFF;
@@ -740,6 +796,16 @@ uint32_t GBALoad8(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 		}
 		value &= 0xFF;
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			value = block->data[address & (block->size - 1)];
+			break;
+		}
+		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load8: 0x%08x", address);
+		value = (GBALoadBad(cpu) >> ((address & 3) * 8)) & 0xFF;
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Load8: 0x%08x", address);
 		value = (GBALoadBad(cpu) >> ((address & 3) * 8)) & 0xFF;
@@ -822,6 +888,16 @@ uint32_t GBALoad8(struct ARMCore* cpu, uint32_t address, int* cycleCounter) {
 #define STORE_BAD \
 	mLOG(GBA_MEM, GAME_ERROR, "Bad memory Store32: 0x%08X", address);
 
+#define STORE_CHEAT_RAM \
+	{ \
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address); \
+		if (block) { \
+			STORE_32(value, address & (block->size - 4), block->data); \
+		} else { \
+			STORE_BAD; \
+		} \
+	}
+
 void GBAStore32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycleCounter) {
 	struct GBA* gba = (struct GBA*) cpu->master;
 	struct GBAMemory* memory = &gba->memory;
@@ -859,6 +935,9 @@ void GBAStore32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycle
 	case GBA_REGION_SRAM:
 	case GBA_REGION_SRAM_MIRROR:
 		STORE_SRAM;
+		break;
+	case GBA_REGION_CHEAT_RAM:
+		STORE_CHEAT_RAM;
 		break;
 	default:
 		STORE_BAD;
@@ -1005,6 +1084,15 @@ void GBAStore16(struct ARMCore* cpu, uint32_t address, int16_t value, int* cycle
 		}
 		GBAStore8(cpu, address, value, cycleCounter);
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			STORE_16(value, address & (block->size - 2), block->data);
+			break;
+		}
+		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Store16: 0x%08X", address);
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Store16: 0x%08X", address);
 		break;
@@ -1091,6 +1179,15 @@ void GBAStore8(struct ARMCore* cpu, uint32_t address, int8_t value, int* cycleCo
 		}
 		wait = memory->waitstatesNonseq16[GBA_REGION_SRAM];
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			block->data[address & (block->size - 1)] = value;
+			break;
+		}
+		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Store8: 0x%08X", address);
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, GAME_ERROR, "Bad memory Store8: 0x%08X", address);
 		break;
@@ -1138,6 +1235,11 @@ uint32_t GBAView32(struct ARMCore* cpu, uint32_t address) {
 		value |= GBALoad8(cpu, address + 2, 0) << 16;
 		value |= GBALoad8(cpu, address + 3, 0) << 24;
 		break;
+	case GBA_REGION_CHEAT_RAM:
+		if (_cheatRamLookup(&gba->memory, address)) {
+			value = GBALoad32(cpu, address, 0);
+		}
+		break;
 	default:
 		break;
 	}
@@ -1179,6 +1281,11 @@ uint16_t GBAView16(struct ARMCore* cpu, uint32_t address) {
 		value = GBALoad8(cpu, address, 0);
 		value |= GBALoad8(cpu, address + 1, 0) << 8;
 		break;
+	case GBA_REGION_CHEAT_RAM:
+		if (_cheatRamLookup(&gba->memory, address)) {
+			value = GBALoad16(cpu, address, 0);
+		}
+		break;
 	default:
 		break;
 	}
@@ -1210,6 +1317,11 @@ uint8_t GBAView8(struct ARMCore* cpu, uint32_t address) {
 	case GBA_REGION_VRAM:
 	case GBA_REGION_OAM:
 		value = GBAView16(cpu, address) >> ((address & 1) * 8);
+		break;
+	case GBA_REGION_CHEAT_RAM:
+		if (_cheatRamLookup(&gba->memory, address)) {
+			value = GBALoad8(cpu, address, 0);
+		}
 		break;
 	default:
 		break;
@@ -1282,6 +1394,16 @@ void GBAPatch32(struct ARMCore* cpu, uint32_t address, int32_t value, int32_t* o
 			mLOG(GBA_MEM, GAME_ERROR, "Writing to non-existent SRAM: 0x%08X", address);
 		}
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			LOAD_32(oldValue, address & (block->size - 4), block->data);
+			STORE_32(value, address & (block->size - 4), block->data);
+			break;
+		}
+		mLOG(GBA_MEM, WARN, "Bad memory Patch32: 0x%08X", address);
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, WARN, "Bad memory Patch16: 0x%08X", address);
 		break;
@@ -1352,6 +1474,16 @@ void GBAPatch16(struct ARMCore* cpu, uint32_t address, int16_t value, int16_t* o
 			mLOG(GBA_MEM, GAME_ERROR, "Writing to non-existent SRAM: 0x%08X", address);
 		}
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			LOAD_16(oldValue, address & (block->size - 2), block->data);
+			STORE_16(value, address & (block->size - 2), block->data);
+			break;
+		}
+		mLOG(GBA_MEM, WARN, "Bad memory Patch16: 0x%08X", address);
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, WARN, "Bad memory Patch16: 0x%08X", address);
 		break;
@@ -1438,6 +1570,16 @@ void GBAPatch8(struct ARMCore* cpu, uint32_t address, int8_t value, int8_t* old)
 			mLOG(GBA_MEM, GAME_ERROR, "Writing to non-existent SRAM: 0x%08X", address);
 		}
 		break;
+	case GBA_REGION_CHEAT_RAM: {
+		struct GBACheatRAMBlock* block = _cheatRamLookup(memory, address);
+		if (block) {
+			oldValue = block->data[address & (block->size - 1)];
+			block->data[address & (block->size - 1)] = value;
+			break;
+		}
+		mLOG(GBA_MEM, WARN, "Bad memory Patch8: 0x%08X", address);
+		break;
+	}
 	default:
 		mLOG(GBA_MEM, WARN, "Bad memory Patch8: 0x%08X", address);
 		break;
@@ -1540,6 +1682,9 @@ uint32_t GBALoadMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum L
 	case GBA_REGION_SRAM:
 	case GBA_REGION_SRAM_MIRROR:
 		LDM_LOOP(LOAD_SRAM);
+		break;
+	case GBA_REGION_CHEAT_RAM:
+		LDM_LOOP(LOAD_CHEAT_RAM);
 		break;
 	default:
 		LDM_LOOP(LOAD_BAD);
@@ -1659,6 +1804,9 @@ uint32_t GBAStoreMultiple(struct ARMCore* cpu, uint32_t address, int mask, enum 
 	case GBA_REGION_SRAM:
 	case GBA_REGION_SRAM_MIRROR:
 		STM_LOOP(STORE_SRAM);
+		break;
+	case GBA_REGION_CHEAT_RAM:
+		STM_LOOP(STORE_CHEAT_RAM);
 		break;
 	default:
 		STM_LOOP(STORE_BAD);
@@ -1966,4 +2114,203 @@ static int16_t _agbPrintLoad(struct GBA* gba, uint32_t address) {
 		value = (&memory->agbPrintCtx.request)[(address & 7) >> 1];
 	}
 	return value;
+}
+
+bool GBACheatRAMValidate(uint32_t base, uint32_t size, uint32_t* alignedSize) {
+	if (!size || size > GBA_CHEAT_RAM_MAX_SIZE) {
+		return false;
+	}
+	uint32_t aligned = GBA_CHEAT_RAM_MIN_SIZE;
+	while (aligned < size) {
+		aligned <<= 1;
+	}
+	if (base >> BASE_OFFSET != GBA_REGION_CHEAT_RAM || (base & (aligned - 1))) {
+		return false;
+	}
+	if (alignedSize) {
+		*alignedSize = aligned;
+	}
+	return true;
+}
+
+static struct GBACheatRAMBlock* _cheatRamFind(struct GBACheatRAMBlock* blocks, uint32_t base, uint32_t size) {
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		if (blocks[i].data && blocks[i].base == base && blocks[i].size == size) {
+			return &blocks[i];
+		}
+	}
+	return NULL;
+}
+
+static void _cheatRamRefreshActiveRegion(struct GBA* gba) {
+	if (gba->memory.activeRegion == GBA_REGION_CHEAT_RAM || (gba->cpu->gprs[ARM_PC] >> BASE_OFFSET) == GBA_REGION_CHEAT_RAM) {
+		// The block the CPU executes from changed; refetch the mapping
+		gba->memory.activeRegion = -1;
+		gba->cpu->memory.setActiveRegion(gba->cpu, gba->cpu->gprs[ARM_PC]);
+	}
+}
+
+bool GBAMemoryMapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size) {
+	struct GBAMemory* memory = &gba->memory;
+	uint32_t aligned;
+	if (!GBACheatRAMValidate(base, size, &aligned)) {
+		mLOG(GBA_MEM, ERROR, "Invalid cheat RAM block: 0x%08X+0x%X", base, size);
+		return false;
+	}
+	struct GBACheatRAMBlock* block = _cheatRamFind(memory->cheatRam, base, aligned);
+	if (block) {
+		return true;
+	}
+	size_t i;
+	struct GBACheatRAMBlock* freeBlock = NULL;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		block = &memory->cheatRam[i];
+		if (!block->data) {
+			if (!freeBlock) {
+				freeBlock = block;
+			}
+			continue;
+		}
+		if (base < block->base + block->size && block->base < base + aligned) {
+			mLOG(GBA_MEM, ERROR, "Cheat RAM block 0x%08X+0x%X overlaps 0x%08X+0x%X", base, aligned, block->base, block->size);
+			return false;
+		}
+	}
+	if (!freeBlock) {
+		mLOG(GBA_MEM, ERROR, "Too many cheat RAM blocks");
+		return false;
+	}
+	freeBlock->data = calloc(1, aligned);
+	if (!freeBlock->data) {
+		return false;
+	}
+	freeBlock->base = base;
+	freeBlock->size = aligned;
+
+	struct GBACheatRAMBlock* pending = _cheatRamFind(memory->cheatRamPending, base, aligned);
+	if (pending) {
+		memcpy(freeBlock->data, pending->data, aligned);
+		free(pending->data);
+		memset(pending, 0, sizeof(*pending));
+	}
+	_cheatRamRefreshActiveRegion(gba);
+	return true;
+}
+
+void GBAMemoryUnmapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size) {
+	uint32_t aligned;
+	if (!GBACheatRAMValidate(base, size, &aligned)) {
+		return;
+	}
+	struct GBACheatRAMBlock* block = _cheatRamFind(gba->memory.cheatRam, base, aligned);
+	if (!block) {
+		return;
+	}
+	free(block->data);
+	memset(block, 0, sizeof(*block));
+	_cheatRamRefreshActiveRegion(gba);
+}
+
+struct GBACheatRAMBlock* GBAMemoryCheatRAMLookup(struct GBAMemory* memory, uint32_t address) {
+	return _cheatRamLookup(memory, address);
+}
+
+void GBAMemoryClearCheatRAM(struct GBA* gba) {
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		free(gba->memory.cheatRam[i].data);
+		free(gba->memory.cheatRamPending[i].data);
+	}
+	memset(gba->memory.cheatRam, 0, sizeof(gba->memory.cheatRam));
+	memset(gba->memory.cheatRamPending, 0, sizeof(gba->memory.cheatRamPending));
+}
+
+// Savestate extdata layout (little endian):
+//   u32 block count, then per block: u32 base, u32 size, size bytes of data
+void GBAMemorySerializeCheatRAM(struct GBA* gba, void** buffer, size_t* size) {
+	size_t total = sizeof(uint32_t);
+	uint32_t count = 0;
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		if (gba->memory.cheatRam[i].data) {
+			total += 2 * sizeof(uint32_t) + gba->memory.cheatRam[i].size;
+			++count;
+		}
+	}
+	*buffer = NULL;
+	*size = 0;
+	if (!count) {
+		return;
+	}
+	uint8_t* out = malloc(total);
+	size_t offset = 0;
+	STORE_32LE(count, offset, out);
+	offset += sizeof(uint32_t);
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		const struct GBACheatRAMBlock* block = &gba->memory.cheatRam[i];
+		if (!block->data) {
+			continue;
+		}
+		STORE_32LE(block->base, offset, out);
+		STORE_32LE(block->size, offset + sizeof(uint32_t), out);
+		offset += 2 * sizeof(uint32_t);
+		memcpy(&out[offset], block->data, block->size);
+		offset += block->size;
+	}
+	*buffer = out;
+	*size = total;
+}
+
+bool GBAMemoryDeserializeCheatRAM(struct GBA* gba, const void* buffer, size_t size) {
+	const uint8_t* in = buffer;
+	size_t i;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		free(gba->memory.cheatRamPending[i].data);
+	}
+	memset(gba->memory.cheatRamPending, 0, sizeof(gba->memory.cheatRamPending));
+	// Blocks the state does not mention start out zeroed
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		if (gba->memory.cheatRam[i].data) {
+			memset(gba->memory.cheatRam[i].data, 0, gba->memory.cheatRam[i].size);
+		}
+	}
+	if (!buffer) {
+		return true;
+	}
+	if (size < sizeof(uint32_t)) {
+		return false;
+	}
+	uint32_t count;
+	LOAD_32LE(count, 0, in);
+	size_t offset = sizeof(uint32_t);
+	size_t pending = 0;
+	for (i = 0; i < count; ++i) {
+		uint32_t base;
+		uint32_t blockSize;
+		uint32_t aligned;
+		if (size - offset < 2 * sizeof(uint32_t)) {
+			return false;
+		}
+		LOAD_32LE(base, offset, in);
+		LOAD_32LE(blockSize, offset + sizeof(uint32_t), in);
+		offset += 2 * sizeof(uint32_t);
+		if (!GBACheatRAMValidate(base, blockSize, &aligned) || aligned != blockSize || size - offset < blockSize) {
+			return false;
+		}
+		struct GBACheatRAMBlock* block = _cheatRamFind(gba->memory.cheatRam, base, blockSize);
+		if (block) {
+			memcpy(block->data, &in[offset], blockSize);
+		} else if (pending < GBA_CHEAT_RAM_MAX_BLOCKS) {
+			// Not mapped (yet): keep it for when its cheat gets enabled
+			block = &gba->memory.cheatRamPending[pending];
+			block->data = malloc(blockSize);
+			memcpy(block->data, &in[offset], blockSize);
+			block->base = base;
+			block->size = blockSize;
+			++pending;
+		}
+		offset += blockSize;
+	}
+	return true;
 }

@@ -22,6 +22,7 @@ CXX_GUARD_START
 
 enum GBAMemoryRegion {
 	GBA_REGION_BIOS = 0x0,
+	GBA_REGION_CHEAT_RAM = 0x1, // Unused on hardware, see GBAMemoryMapCheatRAM
 	GBA_REGION_EWRAM = 0x2,
 	GBA_REGION_IWRAM = 0x3,
 	GBA_REGION_IO = 0x4,
@@ -40,6 +41,7 @@ enum GBAMemoryRegion {
 
 enum GBAMemoryBase {
 	GBA_BASE_BIOS = 0x00000000,
+	GBA_BASE_CHEAT_RAM = 0x01000000,
 	GBA_BASE_EWRAM = 0x02000000,
 	GBA_BASE_IWRAM = 0x03000000,
 	GBA_BASE_IO = 0x04000000,
@@ -99,6 +101,20 @@ struct GBAPrintContext {
 	uint16_t put;
 };
 
+// RAM blocks allocated by cheats ("alloc" codes) in the otherwise unmapped
+// region 0x01000000-0x01FFFFFF. Sizes are powers of two between
+// GBA_CHEAT_RAM_MIN_SIZE and GBA_CHEAT_RAM_MAX_SIZE and blocks are aligned
+// to their size, so the CPU can execute from them like from any other RAM.
+#define GBA_CHEAT_RAM_MAX_BLOCKS 8
+#define GBA_CHEAT_RAM_MIN_SIZE 0x10
+#define GBA_CHEAT_RAM_MAX_SIZE 0x100000
+
+struct GBACheatRAMBlock {
+	uint32_t base;
+	uint32_t size;
+	uint8_t* data;
+};
+
 struct GBAMemory {
 	uint32_t* bios;
 	uint32_t* wram;
@@ -137,6 +153,10 @@ struct GBAMemory {
 	struct GBAPrintContext agbPrintCtxBackup;
 	uint32_t agbPrintFuncBackup;
 	uint16_t* agbPrintBufferBackup;
+
+	struct GBACheatRAMBlock cheatRam[GBA_CHEAT_RAM_MAX_BLOCKS];
+	// Contents restored from a savestate before the cheat that owns them was mapped
+	struct GBACheatRAMBlock cheatRamPending[GBA_CHEAT_RAM_MAX_BLOCKS];
 };
 
 struct GBA;
@@ -171,6 +191,14 @@ uint32_t GBAStoreMultiple(struct ARMCore*, uint32_t baseAddress, int mask, enum 
 
 void GBAAdjustWaitstates(struct GBA* gba, uint16_t parameters);
 void GBAAdjustEWRAMWaitstates(struct GBA* gba, uint16_t parameters);
+
+bool GBACheatRAMValidate(uint32_t base, uint32_t size, uint32_t* alignedSize);
+bool GBAMemoryMapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size);
+void GBAMemoryUnmapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size);
+struct GBACheatRAMBlock* GBAMemoryCheatRAMLookup(struct GBAMemory* memory, uint32_t address);
+void GBAMemoryClearCheatRAM(struct GBA* gba);
+void GBAMemorySerializeCheatRAM(struct GBA* gba, void** buffer, size_t* size);
+bool GBAMemoryDeserializeCheatRAM(struct GBA* gba, const void* buffer, size_t size);
 
 struct GBASerializedState;
 void GBAMemorySerialize(const struct GBAMemory* memory, struct GBASerializedState* state);

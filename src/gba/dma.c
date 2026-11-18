@@ -264,6 +264,9 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 	uint32_t dest = info->nextDest;
 	uint32_t sourceRegion = source >> BASE_OFFSET;
 	uint32_t destRegion = dest >> BASE_OFFSET;
+	// Cheat RAM blocks are readable by DMA like other RAM; anything else
+	// below EWRAM (BIOS, unmapped) returns the latched value as on hardware
+	bool sourceReadable = source >= GBA_BASE_EWRAM || (sourceRegion == GBA_REGION_CHEAT_RAM && GBAMemoryCheatRAMLookup(memory, source));
 	enum mMemoryAccessSource oldAccess = cpu->memory.accessSource;
 	int32_t cycles = 2;
 
@@ -276,7 +279,7 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 			cycles += memory->waitstatesNonseq32[sourceRegion] + memory->waitstatesNonseq32[destRegion];
 			info->cycles = memory->waitstatesSeq32[sourceRegion] + memory->waitstatesSeq32[destRegion];
 		} else {
-			if (source >= GBA_BASE_EWRAM) {
+			if (sourceReadable) {
 				info->latch = cpu->memory.load32(cpu, source, 0);
 			}
 			cycles += memory->waitstatesNonseq16[sourceRegion] + memory->waitstatesNonseq16[destRegion];
@@ -288,7 +291,7 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 	info->when += cycles;
 
 	if (width == 4) {
-		if (source >= GBA_BASE_EWRAM) {
+		if (sourceReadable) {
 			info->latch = cpu->memory.load32(cpu, source, 0);
 		}
 		cpu->memory.store32(cpu, dest, info->latch, 0);
@@ -297,7 +300,7 @@ void GBADMAService(struct GBA* gba, int number, struct GBADMA* info) {
 		if (sourceRegion == GBA_REGION_ROM2_EX && (memory->savedata.type == GBA_SAVEDATA_EEPROM || memory->savedata.type == GBA_SAVEDATA_EEPROM512)) {
 			info->latch = GBASavedataReadEEPROM(&memory->savedata);
 			info->latch |= info->latch << 16;
-		} else if (source >= GBA_BASE_EWRAM) {
+		} else if (sourceReadable) {
 			info->latch = cpu->memory.load16(cpu, source, 0);
 			info->latch |= info->latch << 16;
 		}

@@ -711,6 +711,7 @@ static void _GBACoreUnloadROM(struct mCore* core) {
 		mCheatDeviceDestroy(gbacore->cheatDevice);
 		gbacore->cheatDevice = NULL;
 	}
+	GBAMemoryClearCheatRAM(core->board);
 	GBAUnloadROM(core->board);
 }
 
@@ -947,6 +948,11 @@ static bool _GBACoreLoadExtraState(struct mCore* core, const struct mStateExtdat
 			ok = false;
 		}
 	}
+	if (mStateExtdataGet(extdata, EXTDATA_SUBSYSTEM_START + GBA_SUBSYSTEM_CHEAT_RAM, &item) && item.data) {
+		ok = GBAMemoryDeserializeCheatRAM(gba, item.data, item.size) && ok;
+	} else {
+		GBAMemoryDeserializeCheatRAM(gba, NULL, 0);
+	}
 	return ok;
 }
 
@@ -988,6 +994,15 @@ static bool _GBACoreSaveExtraState(struct mCore* core, struct mStateExtdata* ext
 			buffer = NULL;
 		}
 		size = 0;
+	}
+
+	GBAMemorySerializeCheatRAM(gba, &buffer, &size);
+	if (size > 0 && buffer) {
+		struct mStateExtdataItem item;
+		item.size = size;
+		item.data = buffer;
+		item.clean = free;
+		mStateExtdataPut(extdata, EXTDATA_SUBSYSTEM_START + GBA_SUBSYSTEM_CHEAT_RAM, &item);
 	}
 
 	return true;

@@ -12,6 +12,7 @@ CXX_GUARD_START
 
 #include <mgba/internal/arm/arm.h>
 #include <mgba/core/cheats.h>
+#include <mgba/internal/gba/memory.h>
 #include <mgba-util/vector.h>
 
 #define COMPLETE ((size_t) -1)
@@ -158,11 +159,21 @@ struct GBACheatSet {
 	uint8_t cbTable[0x30];
 	uint32_t cbSeeds[4];
 	int remainingAddresses;
+
+	// "alloc <address> <size>" lines: RAM blocks mapped while the set is enabled
+	struct GBACheatAlloc {
+		uint32_t base;
+		uint32_t size;
+	} allocs[GBA_CHEAT_RAM_MAX_BLOCKS];
+	size_t nAllocs;
 };
 
 struct VFile;
 
 struct mCheatDevice* GBACheatDeviceCreate(void);
+
+bool GBACheatAddAllocLine(struct GBACheatSet*, const char* line);
+void GBACheatSyncAllocations(struct mCheatDevice*);
 
 bool GBACheatAddCodeBreaker(struct GBACheatSet*, uint32_t op1, uint16_t op2);
 bool GBACheatAddCodeBreakerLine(struct GBACheatSet*, const char* line);
