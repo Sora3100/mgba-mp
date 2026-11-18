@@ -224,8 +224,8 @@ private:
 	mInputMap m_inputMap;
 	mInputMap m_playerMaps[MAX_CONTROLLERS];
 	mInputMap m_extendedMaps[MAX_CONTROLLERS];
-	bool m_multiController = false;
-	bool m_extendedButtons = false;
+	bool m_multiController = true;
+	bool m_extendedButtons = true;
 	int m_eventPlayer = 1;
 	ConfigController* m_config = nullptr;
 	int m_playerId;

@@ -156,6 +156,8 @@ ConfigController::ConfigController(QObject* parent)
 	mCoreConfigSetDefaultIntValue(&m_config, "gb.colors", GB_COLORS_CGB);
 #endif
 	mCoreConfigSetDefaultIntValue(&m_config, "preload", true);
+	mCoreConfigSetDefaultIntValue(&m_config, "multiController", true);
+	mCoreConfigSetDefaultIntValue(&m_config, "extendedButtons", true);
 	mCoreConfigMap(&m_config, &m_opts);
 
 	mSubParserGraphicsInit(&m_subparsers[0], &m_graphicsOpts);

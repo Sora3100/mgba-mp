@@ -2,8 +2,8 @@ mgba-mp
 =======
 
 mgba-mp is a fork of mGBA that adds local multi-controller support for Game Boy Advance games (and ROM hacks) that
-are written to use it, plus a cheat code type that gives a game extra RAM. Everything is off by default; with the
-options off, mgba-mp behaves like upstream mGBA. The upstream README follows below.
+are written to use it, plus a cheat code type that gives a game extra RAM. Multiple controllers and extended buttons are on by
+default; with both toggles off (and no alloc cheats), mgba-mp behaves like upstream mGBA. The upstream README follows below.
 
 ### What it adds
 
@@ -19,7 +19,7 @@ options off, mgba-mp behaves like upstream mGBA. The upstream README follows bel
   game for every player. They are never mixed into the normal GBA buttons; a game only sees them through the
   registers below. They are bound below the normal key editor on the Controllers page.
 - **Two toggles** on the Controllers page: "Enable multiple controllers" and "Enable extended buttons" (config keys
-  `multiController` and `extendedButtons`). Players 2-8 and the extended buttons are only used while their toggle is on.
+  `multiController` and `extendedButtons`). Both are on by default. Players 2-8 and the extended buttons are only used while their toggle is on.
 - **Link play wins.** While a link cable session is active, both features are turned off and the register range
   behaves exactly like upstream. The Controllers page shows a note and greys out the toggles.
 - **RAM-allocation cheat.** A cheat line can map extra RAM into an address range that is unused on real hardware.
