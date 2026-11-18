@@ -229,6 +229,8 @@ void InputController::addInputDriver(std::shared_ptr<InputDriver> driver) {
 
 void InputController::setConfiguration(ConfigController* config) {
 	m_config = config;
+	m_multiController = config->getOption("multiController").toInt();
+	m_extendedButtons = config->getOption("extendedButtons").toInt();
 	loadConfiguration(KEYBOARD);
 	for (auto& driver : m_inputDrivers) {
 		driver->loadConfiguration(config);
@@ -244,21 +246,58 @@ void InputController::setConfiguration(ConfigController* config) {
 	updateExtraPlayers();
 }
 
+static void _countAxis(int, const mInputAxis*, void* user) {
+	++*static_cast<int*>(user);
+}
+
+static void _countHat(int, const mInputHatBindings*, void* user) {
+	++*static_cast<int*>(user);
+}
+
+// True when the map has no binding at all for this input type, either because
+// nothing was saved or because everything was cleared.
+static bool _mapIsEmpty(const mInputMap* map, uint32_t type, int nKeys) {
+	for (int key = 0; key < nKeys; ++key) {
+		if (mInputQueryBinding(map, type, key) >= 0) {
+			return false;
+		}
+	}
+	int count = 0;
+	mInputEnumerateAxes(map, type, _countAxis, &count);
+	mInputEnumerateHats(map, type, _countHat, &count);
+	return count == 0;
+}
+
 void InputController::loadPlayerConfiguration(uint32_t type) {
 	auto driver = m_inputDrivers.value(type);
 	if (!driver || !m_config) {
 		return;
 	}
-	// Auto-fill: a player without saved bindings gets the same defaults
-	// player 1 gets, so every newly detected pad works without binding it.
+	// Auto-fill: a player with nothing bound gets the default layout: every
+	// GBA button, with the d-pad on both the pad's d-pad and its left stick.
 	for (int player = 2; player <= MAX_CONTROLLERS; ++player) {
-		if (!mInputMapLoad(playerMap(player), type, m_config->input())) {
-			driver->bindPlayerDefaults(playerMap(player));
+		mInputMap* map = playerMap(player);
+		if (!mInputMapLoad(map, type, m_config->input()) || _mapIsEmpty(map, type, GBA_KEY_MAX)) {
+			driver->bindPlayerDefaults(map);
 		}
 	}
 	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
-		if (!mInputMapLoad(extendedMap(player), type, m_config->input())) {
-			driver->bindExtendedDefaults(extendedMap(player));
+		mInputMapLoad(extendedMap(player), type, m_config->input());
+	}
+	fillExtendedDefaults(type);
+}
+
+// With extended buttons on, players whose extended buttons are all unbound get
+// the default extended layout too, so every button is filled.
+void InputController::fillExtendedDefaults(uint32_t type) {
+	auto driver = m_inputDrivers.value(type);
+	if (!driver || !m_extendedButtons) {
+		return;
+	}
+	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
+		mInputMap* map = extendedMap(player);
+		if (_mapIsEmpty(map, type, GBA_EXT_KEY_MAX)) {
+			driver->bindExtendedDefaults(map);
 		}
 	}
 }
@@ -306,6 +345,11 @@ void InputController::setMultiControllerEnabled(bool enabled) {
 
 void InputController::setExtendedButtonsEnabled(bool enabled) {
 	m_extendedButtons = enabled;
+	for (auto& driver : m_inputDrivers) {
+		if (driver->supportsGamepads()) {
+			fillExtendedDefaults(driver->type());
+		}
+	}
 	emit playersChanged();
 }
 
@@ -444,7 +488,7 @@ bool InputController::loadConfiguration(uint32_t type) {
 	if (!driver) {
 		return false;
 	}
-	if (!loaded) {
+	if (!loaded || _mapIsEmpty(&m_inputMap, type, GBA_KEY_MAX)) {
 		driver->bindDefaults(this);
 	}
 	driver->loadConfiguration(m_config);
