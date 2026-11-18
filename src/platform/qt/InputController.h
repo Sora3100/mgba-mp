@@ -56,6 +56,7 @@ public:
 
 	static const uint32_t KEYBOARD = 0x51545F4B;
 	static const int POLL_INTERVAL_MS = 8;
+	static const int MAX_CONTROLLERS = 8;
 
 	InputController(QWidget* topLevel = nullptr, QObject* parent = nullptr);
 	~InputController();
@@ -110,7 +111,32 @@ public:
 	mImageSource* imageSource() { return &m_image; }
 	GBALuminanceSource* luminance() { return &m_lux; }
 
+	// Multi-controller support (players are 1-based)
+	mInputMap* playerMap(int player);
+	mInputMap* extendedMap(int player);
+	InputMapper playerMapper(int player, uint32_t type);
+	InputMapper extendedMapper(int player, uint32_t type);
+	void savePlayerConfiguration(int player, uint32_t type);
+
+	void setMultiControllerEnabled(bool enabled);
+	void setExtendedButtonsEnabled(bool enabled);
+	bool multiControllerEnabled() const { return m_multiController; }
+	bool extendedButtonsEnabled() const { return m_extendedButtons; }
+	bool multiControllerActive() const;
+	bool extendedButtonsActive() const;
+	static bool isLinked();
+
+	void pollPlayers(uint16_t* keys, uint16_t* extendedKeys);
+
+	QString playerGamepadName(int player, uint32_t type = 0);
+	int playerGamepadIndex(int player, uint32_t type = 0);
+	void setPlayerGamepad(int player, uint32_t type, int index);
+
+	void setEventPlayer(int player);
+	int eventPlayer() const { return m_eventPlayer; }
+
 signals:
+	void playersChanged();
 	void updated();
 	void profileLoaded(const QString& profile);
 	void luminanceValueChanged(int value);
@@ -146,6 +172,12 @@ private:
 
 	static int claimPlayer();
 	static void freePlayer(int);
+
+	void updateExtraPlayers();
+	void loadPlayerConfiguration(uint32_t type);
+	QList<bool> eventButtons(uint32_t type);
+	QList<int16_t> eventAxes(uint32_t type);
+	QList<GamepadHatEvent::Direction> eventHats(uint32_t type);
 
 	std::shared_ptr<Gamepad> gamepad(uint32_t type);
 	QList<std::shared_ptr<Gamepad>> gamepads();
@@ -188,7 +220,13 @@ private:
 #endif
 
 	static int s_claimedPlayers;
+	static QList<InputController*> s_controllers;
 	mInputMap m_inputMap;
+	mInputMap m_playerMaps[MAX_CONTROLLERS];
+	mInputMap m_extendedMaps[MAX_CONTROLLERS];
+	bool m_multiController = false;
+	bool m_extendedButtons = false;
+	int m_eventPlayer = 1;
 	ConfigController* m_config = nullptr;
 	int m_playerId;
 	QWidget* m_topLevel;

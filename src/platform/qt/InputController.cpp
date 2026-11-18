@@ -27,11 +27,52 @@
 #endif
 
 #include <mgba/core/interface.h>
+#include <mgba/internal/gba/input.h>
+#include <mgba/internal/gba/multipad.h>
 #include <mgba-util/configuration.h>
+
+#include <cstdio>
 
 using namespace QGBA;
 
 int InputController::s_claimedPlayers = 0;
+QList<InputController*> InputController::s_controllers;
+
+static const char* s_extendedKeyNames[GBA_EXT_KEY_MAX] = {
+	"X",
+	"Y",
+	"ZL",
+	"ZR",
+	"L3",
+	"R3",
+	"Guide",
+	"Back",
+};
+
+// Each player gets its own config sections: "gba.pN.input.*" for the GBA
+// buttons of players 2..8, "gba.pN.ext.input.*" for the extended buttons.
+static char s_playerPlatformNames[InputController::MAX_CONTROLLERS][16];
+static char s_extendedPlatformNames[InputController::MAX_CONTROLLERS][16];
+static mInputPlatformInfo s_playerInfo[InputController::MAX_CONTROLLERS];
+static mInputPlatformInfo s_extendedInfo[InputController::MAX_CONTROLLERS];
+
+static void _initPlayerInfo() {
+	static bool inited = false;
+	if (inited) {
+		return;
+	}
+	inited = true;
+	for (int i = 0; i < InputController::MAX_CONTROLLERS; ++i) {
+		snprintf(s_playerPlatformNames[i], sizeof(s_playerPlatformNames[i]), "gba.p%i", i + 1);
+		snprintf(s_extendedPlatformNames[i], sizeof(s_extendedPlatformNames[i]), "gba.p%i.ext", i + 1);
+		s_playerInfo[i] = GBAInputInfo;
+		s_playerInfo[i].platformName = s_playerPlatformNames[i];
+		s_extendedInfo[i].platformName = s_extendedPlatformNames[i];
+		s_extendedInfo[i].keyId = s_extendedKeyNames;
+		s_extendedInfo[i].nKeys = GBA_EXT_KEY_MAX;
+		s_extendedInfo[i].hat = { -1, -1, -1, -1 };
+	}
+}
 
 InputController::InputController(QWidget* topLevel, QObject* parent)
 	: QObject(parent)
@@ -40,6 +81,18 @@ InputController::InputController(QWidget* topLevel, QObject* parent)
 	, m_focusParent(topLevel)
 {
 	mInputMapInit(&m_inputMap, &GBAInputInfo);
+	_initPlayerInfo();
+	for (int i = 0; i < MAX_CONTROLLERS; ++i) {
+		mInputMapInit(&m_playerMaps[i], &s_playerInfo[i]);
+		mInputMapInit(&m_extendedMaps[i], &s_extendedInfo[i]);
+	}
+
+	// A second window means a link session: free the extra players' pads
+	// before the new window claims its own
+	for (InputController* other : s_controllers) {
+		other->updateExtraPlayers();
+	}
+	s_controllers.append(this);
 
 	connect(&m_gamepadTimer, &QTimer::timeout, [this]() {
 		for (auto& driver : m_inputDrivers) {
@@ -151,8 +204,19 @@ InputController::InputController(QWidget* topLevel, QObject* parent)
 }
 
 InputController::~InputController() {
-	mInputMapDeinit(&m_inputMap);
+	s_controllers.removeAll(this);
+	// Release our pads before the remaining windows reclaim them
+	m_inputDrivers.clear();
 	freePlayer(m_playerId);
+	for (InputController* other : s_controllers) {
+		other->updateExtraPlayers();
+	}
+
+	mInputMapDeinit(&m_inputMap);
+	for (int i = 0; i < MAX_CONTROLLERS; ++i) {
+		mInputMapDeinit(&m_playerMaps[i]);
+		mInputMapDeinit(&m_extendedMaps[i]);
+	}
 }
 
 void InputController::addInputDriver(std::shared_ptr<InputDriver> driver) {
@@ -168,7 +232,210 @@ void InputController::setConfiguration(ConfigController* config) {
 	loadConfiguration(KEYBOARD);
 	for (auto& driver : m_inputDrivers) {
 		driver->loadConfiguration(config);
+		if (driver->supportsGamepads()) {
+			loadPlayerConfiguration(driver->type());
+			for (int player = 2; player <= MAX_CONTROLLERS; ++player) {
+				driver->setPlayerMap(player, playerMap(player));
+			}
+		}
 	}
+	m_multiController = config->getOption("multiController").toInt();
+	m_extendedButtons = config->getOption("extendedButtons").toInt();
+	updateExtraPlayers();
+}
+
+void InputController::loadPlayerConfiguration(uint32_t type) {
+	auto driver = m_inputDrivers.value(type);
+	if (!driver || !m_config) {
+		return;
+	}
+	// Auto-fill: a player without saved bindings gets the same defaults
+	// player 1 gets, so every newly detected pad works without binding it.
+	for (int player = 2; player <= MAX_CONTROLLERS; ++player) {
+		if (!mInputMapLoad(playerMap(player), type, m_config->input())) {
+			driver->bindPlayerDefaults(playerMap(player));
+		}
+	}
+	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
+		if (!mInputMapLoad(extendedMap(player), type, m_config->input())) {
+			driver->bindExtendedDefaults(extendedMap(player));
+		}
+	}
+}
+
+mInputMap* InputController::playerMap(int player) {
+	if (player <= 1 || player > MAX_CONTROLLERS) {
+		return &m_inputMap;
+	}
+	return &m_playerMaps[player - 1];
+}
+
+mInputMap* InputController::extendedMap(int player) {
+	if (player < 1 || player > MAX_CONTROLLERS) {
+		player = 1;
+	}
+	return &m_extendedMaps[player - 1];
+}
+
+InputMapper InputController::playerMapper(int player, uint32_t type) {
+	return InputMapper(playerMap(player), type);
+}
+
+InputMapper InputController::extendedMapper(int player, uint32_t type) {
+	return InputMapper(extendedMap(player), type);
+}
+
+void InputController::savePlayerConfiguration(int player, uint32_t type) {
+	if (!m_config) {
+		return;
+	}
+	if (player > 1) {
+		mInputMapSave(playerMap(player), type, m_config->input());
+	}
+	mInputMapSave(extendedMap(player), type, m_config->input());
+	m_config->write();
+}
+
+void InputController::setMultiControllerEnabled(bool enabled) {
+	if (m_multiController == enabled) {
+		return;
+	}
+	m_multiController = enabled;
+	updateExtraPlayers();
+}
+
+void InputController::setExtendedButtonsEnabled(bool enabled) {
+	m_extendedButtons = enabled;
+	emit playersChanged();
+}
+
+bool InputController::isLinked() {
+	int claimed = 0;
+	for (int i = 0; i < MAX_GBAS; ++i) {
+		if (s_claimedPlayers & (1 << i)) {
+			++claimed;
+		}
+	}
+	return claimed > 1;
+}
+
+bool InputController::multiControllerActive() const {
+	return m_multiController && m_playerId == 0 && !isLinked();
+}
+
+bool InputController::extendedButtonsActive() const {
+	return m_extendedButtons && multiControllerActive();
+}
+
+void InputController::updateExtraPlayers() {
+	bool active = multiControllerActive();
+	for (auto& driver : m_inputDrivers) {
+		driver->setExtraPlayersEnabled(active);
+	}
+	if (!active) {
+		setEventPlayer(1);
+	}
+	emit playersChanged();
+}
+
+void InputController::pollPlayers(uint16_t* keys, uint16_t* extendedKeys) {
+	bool active = multiControllerActive();
+	bool extended = extendedButtonsActive();
+	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
+		keys[player - 1] = 0;
+		extendedKeys[player - 1] = 0;
+		if (!active || (player == 1 && !extended)) {
+			continue;
+		}
+		for (auto& driver : m_inputDrivers) {
+			if (!driver->supportsGamepads()) {
+				continue;
+			}
+			QList<bool> buttons = driver->playerButtons(player);
+			QList<int16_t> axes = driver->playerAxes(player);
+			QList<GamepadHatEvent::Direction> hats = driver->playerHats(player);
+			if (buttons.isEmpty() && axes.isEmpty() && hats.isEmpty()) {
+				continue;
+			}
+			if (player > 1) {
+				InputMapper im(playerMapper(player, driver->type()));
+				keys[player - 1] |= im.mapKeys(buttons) | im.mapAxes(axes) | im.mapHats(hats);
+			}
+			if (extended) {
+				InputMapper im(extendedMapper(player, driver->type()));
+				extendedKeys[player - 1] |= im.mapKeys(buttons) | im.mapAxes(axes) | im.mapHats(hats);
+			}
+		}
+	}
+}
+
+QString InputController::playerGamepadName(int player, uint32_t type) {
+	if (!type) {
+		type = m_gamepadDriver;
+	}
+	auto driver = m_inputDrivers.value(type);
+	if (!driver) {
+		return {};
+	}
+	return driver->playerGamepadName(player);
+}
+
+int InputController::playerGamepadIndex(int player, uint32_t type) {
+	if (!type) {
+		type = m_gamepadDriver;
+	}
+	auto driver = m_inputDrivers.value(type);
+	if (!driver) {
+		return -1;
+	}
+	return driver->playerGamepadIndex(player);
+}
+
+void InputController::setPlayerGamepad(int player, uint32_t type, int index) {
+	if (!type) {
+		type = m_gamepadDriver;
+	}
+	auto driver = m_inputDrivers.value(type);
+	if (!driver) {
+		return;
+	}
+	driver->setPlayerGamepad(player, index);
+	emit playersChanged();
+}
+
+void InputController::setEventPlayer(int player) {
+	if (player < 1 || player > MAX_CONTROLLERS || (player > 1 && !multiControllerActive())) {
+		player = 1;
+	}
+	QWriteLocker l(&m_eventsLock);
+	m_eventPlayer = player;
+}
+
+QList<bool> InputController::eventButtons(uint32_t type) {
+	if (m_eventPlayer > 1) {
+		auto driver = m_inputDrivers.value(type);
+		return driver ? driver->playerButtons(m_eventPlayer) : QList<bool>();
+	}
+	std::shared_ptr<Gamepad> pad = gamepad(type);
+	return pad ? pad->currentButtons() : QList<bool>();
+}
+
+QList<int16_t> InputController::eventAxes(uint32_t type) {
+	if (m_eventPlayer > 1) {
+		auto driver = m_inputDrivers.value(type);
+		return driver ? driver->playerAxes(m_eventPlayer) : QList<int16_t>();
+	}
+	std::shared_ptr<Gamepad> pad = gamepad(type);
+	return pad ? pad->currentAxes() : QList<int16_t>();
+}
+
+QList<GamepadHatEvent::Direction> InputController::eventHats(uint32_t type) {
+	if (m_eventPlayer > 1) {
+		auto driver = m_inputDrivers.value(type);
+		return driver ? driver->playerHats(m_eventPlayer) : QList<GamepadHatEvent::Direction>();
+	}
+	std::shared_ptr<Gamepad> pad = gamepad(type);
+	return pad ? pad->currentHats() : QList<GamepadHatEvent::Direction>();
 }
 
 bool InputController::loadConfiguration(uint32_t type) {
@@ -415,11 +682,7 @@ QList<std::shared_ptr<Gamepad>> InputController::gamepads() {
 
 QSet<int> InputController::activeGamepadButtons(uint32_t type) {
 	QSet<int> activeButtons;
-	std::shared_ptr<Gamepad> pad = gamepad(type);
-	if (!pad) {
-		return {};
-	}
-	auto allButtons = pad->currentButtons();
+	auto allButtons = eventButtons(type);
 	for (int i = 0; i < allButtons.size(); ++i) {
 		if (allButtons[i]) {
 			activeButtons.insert(i);
@@ -430,12 +693,8 @@ QSet<int> InputController::activeGamepadButtons(uint32_t type) {
 
 QSet<QPair<int, GamepadAxisEvent::Direction>> InputController::activeGamepadAxes(uint32_t type) {
 	QSet<QPair<int, GamepadAxisEvent::Direction>> activeAxes;
-	std::shared_ptr<Gamepad> pad = gamepad(type);
-	if (!pad) {
-		return {};
-	}
 	InputMapper im(mapper(type));
-	auto allAxes = pad->currentAxes();
+	auto allAxes = eventAxes(type);
 	for (int i = 0; i < allAxes.size(); ++i) {
 		if (allAxes[i] - im.axisCenter(i) >= im.axisThreshold(i)) {
 			activeAxes.insert(qMakePair(i, GamepadAxisEvent::POSITIVE));
@@ -451,11 +710,7 @@ QSet<QPair<int, GamepadAxisEvent::Direction>> InputController::activeGamepadAxes
 
 QSet<QPair<int, GamepadHatEvent::Direction>> InputController::activeGamepadHats(uint32_t type) {
 	QSet<QPair<int, GamepadHatEvent::Direction>> activeHats;
-	std::shared_ptr<Gamepad> pad = gamepad(type);
-	if (!pad) {
-		return {};
-	}
-	auto allHats = pad->currentHats();
+	auto allHats = eventHats(type);
 	for (int i = 0; i < allHats.size(); ++i) {
 		if (allHats[i] != GamepadHatEvent::CENTER) {
 			activeHats.insert(qMakePair(i, allHats[i]));

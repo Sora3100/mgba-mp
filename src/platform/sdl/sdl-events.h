@@ -21,7 +21,8 @@ mLOG_DECLARE_CATEGORY(SDL_EVENTS);
 #define SDL_BINDING_BUTTON 0x53444C42U
 #define SDL_BINDING_CONTROLLER 0x53444C43U
 
-#define MAX_PLAYERS 4
+// 4 linked windows plus 7 extra players of a multi-controller window
+#define MAX_PLAYERS 12
 
 struct Configuration;
 

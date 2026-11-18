@@ -5,12 +5,15 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #pragma once
 
+#include "input/GamepadHatEvent.h"
+
 #include <QList>
 #include <QString>
 #include <QObject>
 
 #include <memory>
 
+struct mInputMap;
 struct mRotationSource;
 struct mRumble;
 
@@ -69,6 +72,20 @@ public:
 
 	virtual mRumble* rumble();
 	virtual mRotationSource* rotationSource();
+
+	// Multi-controller support. Players are 1-based; player 1 is the
+	// driver's normal active gamepad.
+	virtual void setPlayerMap(int player, mInputMap* map);
+	virtual void setExtraPlayersEnabled(bool enabled);
+	virtual bool extraPlayersEnabled() const;
+	virtual QList<bool> playerButtons(int player);
+	virtual QList<int16_t> playerAxes(int player);
+	virtual QList<GamepadHatEvent::Direction> playerHats(int player);
+	virtual QString playerGamepadName(int player);
+	virtual int playerGamepadIndex(int player);
+	virtual void setPlayerGamepad(int player, int index);
+	virtual void bindPlayerDefaults(mInputMap* map);
+	virtual void bindExtendedDefaults(mInputMap* map);
 
 private:
 	int m_playerId = -1;

@@ -6,6 +6,8 @@
 #include "input/InputDriver.h"
 #include "input/moc_InputDriver.cpp"
 
+#include "input/Gamepad.h"
+
 using namespace QGBA;
 
 InputDriver::InputDriver(QObject* parent)
@@ -105,4 +107,77 @@ mRumble* InputDriver::rumble() {
 
 mRotationSource* InputDriver::rotationSource() {
 	return nullptr;
+}
+
+void InputDriver::setPlayerMap(int, mInputMap*) {
+}
+
+void InputDriver::setExtraPlayersEnabled(bool) {
+}
+
+bool InputDriver::extraPlayersEnabled() const {
+	return false;
+}
+
+QList<bool> InputDriver::playerButtons(int player) {
+	if (player != 1) {
+		return {};
+	}
+	std::shared_ptr<Gamepad> pad = activeGamepad();
+	if (!pad) {
+		return {};
+	}
+	return pad->currentButtons();
+}
+
+QList<int16_t> InputDriver::playerAxes(int player) {
+	if (player != 1) {
+		return {};
+	}
+	std::shared_ptr<Gamepad> pad = activeGamepad();
+	if (!pad) {
+		return {};
+	}
+	return pad->currentAxes();
+}
+
+QList<GamepadHatEvent::Direction> InputDriver::playerHats(int player) {
+	if (player != 1) {
+		return {};
+	}
+	std::shared_ptr<Gamepad> pad = activeGamepad();
+	if (!pad) {
+		return {};
+	}
+	return pad->currentHats();
+}
+
+QString InputDriver::playerGamepadName(int player) {
+	if (player != 1) {
+		return {};
+	}
+	std::shared_ptr<Gamepad> pad = activeGamepad();
+	if (!pad) {
+		return {};
+	}
+	return pad->visibleName();
+}
+
+int InputDriver::playerGamepadIndex(int player) {
+	if (player != 1) {
+		return -1;
+	}
+	return activeGamepadIndex();
+}
+
+void InputDriver::setPlayerGamepad(int player, int index) {
+	if (player == 1) {
+		setActiveGamepad(index);
+	}
+}
+
+void InputDriver::bindPlayerDefaults(mInputMap*) {
+}
+
+void InputDriver::bindExtendedDefaults(mInputMap*) {
 }

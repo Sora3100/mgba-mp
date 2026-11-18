@@ -1993,6 +1993,18 @@ void Window::setupOptions() {
 		reloadConfig();
 	}, this);
 
+	ConfigOption* multiController = m_config->addOption("multiController");
+	multiController->connect([this](const QVariant& value) {
+		m_inputController.setMultiControllerEnabled(value.toInt());
+		reloadConfig();
+	}, this);
+
+	ConfigOption* extendedButtons = m_config->addOption("extendedButtons");
+	extendedButtons->connect([this](const QVariant& value) {
+		m_inputController.setExtendedButtonsEnabled(value.toInt());
+		reloadConfig();
+	}, this);
+
 	ConfigOption* saveStateExtdata = m_config->addOption("saveStateExtdata");
 	saveStateExtdata->connect([this](const QVariant&) {
 		reloadConfig();

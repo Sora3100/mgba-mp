@@ -71,11 +71,33 @@ public:
 	mRumble* rumble() override;
 	mRotationSource* rotationSource() override;
 
+	void setPlayerMap(int player, mInputMap* map) override;
+	void setExtraPlayersEnabled(bool enabled) override;
+	bool extraPlayersEnabled() const override;
+	QList<bool> playerButtons(int player) override;
+	QList<int16_t> playerAxes(int player) override;
+	QList<GamepadHatEvent::Direction> playerHats(int player) override;
+	QString playerGamepadName(int player) override;
+	int playerGamepadIndex(int player) override;
+	void setPlayerGamepad(int player, int index) override;
+	void bindPlayerDefaults(mInputMap* map) override;
+	void bindExtendedDefaults(mInputMap* map) override;
+
+	// Players 2..8 use the SDL player slots after the ones used by linked windows
+	static const int EXTRA_PLAYERS = 7;
+	static const int EXTRA_PLAYER_BASE = 4; // MAX_GBAS
+
 private:
+	mSDLPlayer* sdlPlayer(int player);
+
 	ConfigController* m_config = nullptr;
 	InputController* m_controller;
 	mSDLPlayer m_sdlPlayer{};
 	bool m_playerAttached = false;
+	mSDLPlayer m_extraPlayers[EXTRA_PLAYERS]{};
+	mInputMap* m_extraMaps[EXTRA_PLAYERS]{};
+	bool m_extraAttached[EXTRA_PLAYERS]{};
+	bool m_extraEnabled = false;
 	QList<std::shared_ptr<SDLGamepad>> m_gamepads;
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)

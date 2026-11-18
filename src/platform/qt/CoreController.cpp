@@ -1226,6 +1226,19 @@ void CoreController::updateKeys() {
 	activeKeys |= m_threadContext.core->getKeys(m_threadContext.core) & ~m_removedKeys;
 	m_removedKeys = polledKeys;
 	m_threadContext.core->setKeys(m_threadContext.core, activeKeys);
+
+#ifdef M_CORE_GBA
+	if (m_threadContext.core->platform(m_threadContext.core) == mPLATFORM_GBA) {
+		uint16_t keys[InputController::MAX_CONTROLLERS];
+		uint16_t extendedKeys[InputController::MAX_CONTROLLERS];
+		m_inputController->pollPlayers(keys, extendedKeys);
+		GBA* gba = static_cast<GBA*>(m_threadContext.core->board);
+		for (int player = 1; player <= InputController::MAX_CONTROLLERS; ++player) {
+			GBAMultipadSetKeys(gba, player, keys[player - 1]);
+			GBAMultipadSetExtKeys(gba, player, extendedKeys[player - 1]);
+		}
+	}
+#endif
 }
 
 int CoreController::updateAutofire() {

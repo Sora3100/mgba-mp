@@ -11,6 +11,8 @@
 
 #include <QSet>
 
+#include <mgba/internal/gba/multipad.h>
+
 #include <algorithm>
 
 using namespace QGBA;
@@ -68,6 +70,12 @@ SDLInputDriver::SDLInputDriver(InputController* controller, QObject* parent)
 
 SDLInputDriver::~SDLInputDriver() {
 	QWriteLocker locker(&s_eventsRwLock);
+	for (int i = 0; i < EXTRA_PLAYERS; ++i) {
+		if (m_extraAttached[i]) {
+			mSDLDetachPlayer(&s_sdlEvents, &m_extraPlayers[i]);
+			m_extraAttached[i] = false;
+		}
+	}
 	if (m_playerAttached) {
 		mSDLDetachPlayer(&s_sdlEvents, &m_sdlPlayer);
 	}
@@ -222,8 +230,183 @@ int SDLInputDriver::activeGamepadIndex() const {
 }
 
 void SDLInputDriver::setActiveGamepad(int index) {
+	setPlayerGamepad(1, index);
+}
+
+mSDLPlayer* SDLInputDriver::sdlPlayer(int player) {
+	if (player == 1) {
+		return m_playerAttached ? &m_sdlPlayer : nullptr;
+	}
+	if (player < 2 || player > EXTRA_PLAYERS + 1) {
+		return nullptr;
+	}
+	return m_extraAttached[player - 2] ? &m_extraPlayers[player - 2] : nullptr;
+}
+
+void SDLInputDriver::setPlayerMap(int player, mInputMap* map) {
+	if (player < 2 || player > EXTRA_PLAYERS + 1) {
+		return;
+	}
+	m_extraMaps[player - 2] = map;
+	m_extraPlayers[player - 2].bindings = map;
+}
+
+void SDLInputDriver::setExtraPlayersEnabled(bool enabled) {
+	QWriteLocker locker(&s_eventsRwLock);
+	m_extraEnabled = enabled;
+	for (int i = 0; i < EXTRA_PLAYERS; ++i) {
+		if (enabled && !m_extraAttached[i] && m_extraMaps[i] && m_playerAttached) {
+			// Attached in player order after player 1, so pads are handed out
+			// in SDL device order (plug-in order) at startup. Hotplugged pads go
+			// to the lowest SDL player slot without one (see mSDLUpdateJoysticks).
+			m_extraPlayers[i].bindings = m_extraMaps[i];
+			m_extraAttached[i] = mSDLAttachPlayer(&s_sdlEvents, &m_extraPlayers[i], EXTRA_PLAYER_BASE + i);
+		} else if (!enabled && m_extraAttached[i]) {
+			mSDLDetachPlayer(&s_sdlEvents, &m_extraPlayers[i]);
+			m_extraPlayers[i].joystick = nullptr;
+			m_extraAttached[i] = false;
+		}
+	}
+}
+
+bool SDLInputDriver::extraPlayersEnabled() const {
+	return m_extraEnabled;
+}
+
+QList<bool> SDLInputDriver::playerButtons(int player) {
 	QReadLocker locker(&s_eventsRwLock);
-	mSDLPlayerChangeJoystick(&s_sdlEvents, &m_sdlPlayer, index);
+	mSDLPlayer* sdl = sdlPlayer(player);
+	if (!sdl || !sdl->joystick) {
+		return {};
+	}
+
+	QList<bool> buttons;
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	SDL_GameController* controller = sdl->joystick->controller;
+	if (!controller) {
+		return {};
+	}
+	for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i) {
+		buttons.append(SDL_GameControllerGetButton(controller, static_cast<SDL_GameControllerButton>(i)));
+	}
+#else
+	SDL_Joystick* joystick = sdl->joystick->joystick;
+	int numButtons = SDL_JoystickNumButtons(joystick);
+	for (int i = 0; i < numButtons; ++i) {
+		buttons.append(SDL_JoystickGetButton(joystick, i));
+	}
+#endif
+	return buttons;
+}
+
+QList<int16_t> SDLInputDriver::playerAxes(int player) {
+	QReadLocker locker(&s_eventsRwLock);
+	mSDLPlayer* sdl = sdlPlayer(player);
+	if (!sdl || !sdl->joystick) {
+		return {};
+	}
+
+	QList<int16_t> axes;
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	SDL_GameController* controller = sdl->joystick->controller;
+	if (!controller) {
+		return {};
+	}
+	for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i) {
+		axes.append(SDL_GameControllerGetAxis(controller, static_cast<SDL_GameControllerAxis>(i)));
+	}
+#else
+	SDL_Joystick* joystick = sdl->joystick->joystick;
+	int numAxes = SDL_JoystickNumAxes(joystick);
+	for (int i = 0; i < numAxes; ++i) {
+		axes.append(SDL_JoystickGetAxis(joystick, i));
+	}
+#endif
+	return axes;
+}
+
+QList<GamepadHatEvent::Direction> SDLInputDriver::playerHats(int player) {
+	QList<GamepadHatEvent::Direction> hats;
+#if !SDL_VERSION_ATLEAST(2, 0, 0)
+	QReadLocker locker(&s_eventsRwLock);
+	mSDLPlayer* sdl = sdlPlayer(player);
+	if (!sdl || !sdl->joystick) {
+		return {};
+	}
+	SDL_Joystick* joystick = sdl->joystick->joystick;
+	int numHats = SDL_JoystickNumHats(joystick);
+	for (int i = 0; i < numHats; ++i) {
+		hats.append(static_cast<GamepadHatEvent::Direction>(SDL_JoystickGetHat(joystick, i)));
+	}
+#else
+	UNUSED(player);
+#endif
+	return hats;
+}
+
+QString SDLInputDriver::playerGamepadName(int player) {
+	QReadLocker locker(&s_eventsRwLock);
+	mSDLPlayer* sdl = sdlPlayer(player);
+	if (!sdl || !sdl->joystick) {
+		return {};
+	}
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	return QString::fromUtf8(SDL_JoystickName(sdl->joystick->joystick));
+#else
+	return QString::fromUtf8(SDL_JoystickName(SDL_JoystickIndex(sdl->joystick->joystick)));
+#endif
+}
+
+int SDLInputDriver::playerGamepadIndex(int player) {
+	QReadLocker locker(&s_eventsRwLock);
+	mSDLPlayer* sdl = sdlPlayer(player);
+	if (!sdl || !sdl->joystick) {
+		return -1;
+	}
+	return sdl->joystick->index;
+}
+
+void SDLInputDriver::setPlayerGamepad(int player, int index) {
+	QWriteLocker locker(&s_eventsRwLock);
+	mSDLPlayer* target = sdlPlayer(player);
+	if (!target || index < 0 || static_cast<size_t>(index) >= SDL_JoystickListSize(&s_sdlEvents.joysticks)) {
+		return;
+	}
+	SDL_JoystickCombo* joystick = SDL_JoystickListGetPointer(&s_sdlEvents.joysticks, index);
+	if (m_extraEnabled) {
+		// Swap with whichever of our players currently holds that pad
+		for (int p = 1; p <= EXTRA_PLAYERS + 1; ++p) {
+			mSDLPlayer* other = sdlPlayer(p);
+			if (other && other != target && other->joystick == joystick) {
+				other->joystick = target->joystick;
+			}
+		}
+	}
+	target->joystick = joystick;
+}
+
+void SDLInputDriver::bindPlayerDefaults(mInputMap* map) {
+	mSDLInitBindingsGBA(map);
+}
+
+void SDLInputDriver::bindExtendedDefaults(mInputMap* map) {
+#if SDL_VERSION_ATLEAST(2, 0, 0)
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_X, GBA_EXT_KEY_X);
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_Y, GBA_EXT_KEY_Y);
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_LEFTSTICK, GBA_EXT_KEY_L3);
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_RIGHTSTICK, GBA_EXT_KEY_R3);
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_GUIDE, GBA_EXT_KEY_GUIDE);
+	mInputBindKey(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_BUTTON_BACK, GBA_EXT_KEY_BACK);
+
+	// Triggers rest at 0 and only go positive
+	struct mInputAxis description = { GBA_EXT_KEY_ZL, -1, 0x4000, INT16_MIN };
+	mInputBindAxis(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_AXIS_TRIGGERLEFT, &description);
+	description = { GBA_EXT_KEY_ZR, -1, 0x4000, INT16_MIN };
+	mInputBindAxis(map, SDL_BINDING_CONTROLLER, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, &description);
+#else
+	mInputBindKey(map, SDL_BINDING_BUTTON, 2, GBA_EXT_KEY_X);
+	mInputBindKey(map, SDL_BINDING_BUTTON, 3, GBA_EXT_KEY_Y);
+#endif
 }
 
 void SDLInputDriver::registerTiltAxisX(int axis) {
