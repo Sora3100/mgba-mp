@@ -384,7 +384,17 @@ static void _GBACoreLoadConfig(struct mCore* core, const struct mCoreConfig* con
 
 	mCoreConfigGetBoolValue(config, "allowOpposingDirections", &gba->allowOpposingDirections);
 
+	bool mpOption;
+	if (mCoreConfigGetBoolValue(config, "multiController", &mpOption)) {
+		GBAMultipadSetEnabled(gba, mpOption);
+	}
+	if (mCoreConfigGetBoolValue(config, "extendedButtons", &mpOption)) {
+		GBAMultipadSetExtEnabled(gba, mpOption);
+	}
+
 	mCoreConfigCopyValue(&core->config, config, "allowOpposingDirections");
+	mCoreConfigCopyValue(&core->config, config, "multiController");
+	mCoreConfigCopyValue(&core->config, config, "extendedButtons");
 	mCoreConfigCopyValue(&core->config, config, "gba.bios");
 	mCoreConfigCopyValue(&core->config, config, "gba.forceGbp");
 	mCoreConfigCopyValue(&core->config, config, "vbaBugCompat");
@@ -440,6 +450,24 @@ static void _GBACoreReloadConfigOption(struct mCore* core, const char* option, c
 			mCoreConfigCopyValue(&core->config, config, "allowOpposingDirections");
 		}
 		mCoreConfigGetBoolValue(config, "allowOpposingDirections", &gba->allowOpposingDirections);
+		return;
+	}
+	if (strcmp("multiController", option) == 0) {
+		if (config != &core->config) {
+			mCoreConfigCopyValue(&core->config, config, "multiController");
+		}
+		bool enabled = false;
+		mCoreConfigGetBoolValue(config, "multiController", &enabled);
+		GBAMultipadSetEnabled(gba, enabled);
+		return;
+	}
+	if (strcmp("extendedButtons", option) == 0) {
+		if (config != &core->config) {
+			mCoreConfigCopyValue(&core->config, config, "extendedButtons");
+		}
+		bool enabled = false;
+		mCoreConfigGetBoolValue(config, "extendedButtons", &enabled);
+		GBAMultipadSetExtEnabled(gba, enabled);
 		return;
 	}
 

@@ -122,6 +122,7 @@ static void GBAInit(void* cpu, struct mCPUComponent* component) {
 	gba->vbaBugCompat = false;
 	gba->hardCrash = true;
 	gba->allowOpposingDirections = true;
+	GBAMultipadInit(&gba->mp);
 
 	gba->performingDMA = false;
 

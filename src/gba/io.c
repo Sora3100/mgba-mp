@@ -772,6 +772,15 @@ uint16_t GBAIORead(struct GBA* gba, uint32_t address) {
 		gba->haltPending = false;
 	}
 
+	if (address >= GBA_MP_REG_MAGIC && address < GBA_MP_REG_END) {
+		// Multi-controller interface; falls through to the upstream
+		// unused-register behaviour when it is inactive
+		uint16_t value;
+		if (GBAMultipadReadRegister(gba, address, &value)) {
+			return value;
+		}
+	}
+
 	switch (address) {
 	// Reading this takes two cycles (1N+1I), so let's remove them preemptively
 	case GBA_REG_TM0CNT_LO:

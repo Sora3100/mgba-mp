@@ -16,6 +16,7 @@ CXX_GUARD_START
 #include <mgba/internal/gba/memory.h>
 #include <mgba/internal/gba/video.h>
 #include <mgba/internal/gba/audio.h>
+#include <mgba/internal/gba/multipad.h>
 #include <mgba/internal/gba/sio.h>
 #include <mgba/internal/gba/timer.h>
 
@@ -121,6 +122,7 @@ struct GBA {
 	bool vbaBugCompat;
 	bool hardCrash;
 	bool allowOpposingDirections;
+	struct GBAMultipad mp;
 
 	bool debug;
 	char debugString[0x100];
