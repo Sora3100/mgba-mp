@@ -1,3 +1,89 @@
+mgba-mp
+=======
+
+mgba-mp is a fork of mGBA that adds local multi-controller support for Game Boy Advance games (and ROM hacks) that
+are written to use it, plus a cheat code type that gives a game extra RAM. Everything is off by default; with the
+options off, mgba-mp behaves like upstream mGBA. The upstream README follows below.
+
+### What it adds
+
+- **Up to 8 controllers.** Player 1 is the normal mGBA input (keyboard and the selected gamepad). Players 2-8 each
+  get their own gamepad. Gamepads are assigned in plug-in order: the first pad plugged in after player 1's becomes
+  player 2, the next player 3, and so on. A pad plugged in later fills the lowest free player slot.
+- **Automatic bindings.** A player without saved bindings gets the default gamepad layout, so a new pad works
+  without any setup.
+- **Player selector.** The Controllers page of the settings has a "Controller:" box at the top that switches between
+  Player 1-8. Each entry shows which gamepad that player has. The selected player's bindings are edited with the usual
+  key editor.
+- **Extended buttons.** The host pad's X, Y, ZL/L2, ZR/R2, L3, R3, Guide/Home and Back buttons can be passed to the
+  game for every player. They are never mixed into the normal GBA buttons; a game only sees them through the
+  registers below. They are bound below the normal key editor on the Controllers page.
+- **Two toggles** on the Controllers page: "Enable multiple controllers" and "Enable extended buttons" (config keys
+  `multiController` and `extendedButtons`). Players 2-8 and the extended buttons are only used while their toggle is on.
+- **Link play wins.** While a link cable session is active, both features are turned off and the register range
+  behaves exactly like upstream. The Controllers page shows a note and greys out the toggles.
+- **RAM-allocation cheat.** A cheat line can map extra RAM into an address range that is unused on real hardware.
+  See below.
+
+### Using it
+
+1. Open the settings, go to Controllers, and tick "Enable multiple controllers" (and "Enable extended buttons" if
+   the game uses them).
+2. Plug in the gamepads in player order. The "Controller:" box shows which pad each player has.
+3. Pick a player in the box to change that player's bindings, then press OK or Apply.
+
+### Register interface (for ROM hackers)
+
+The I/O range `0x04000160`-`0x04000183` is unused on GBA hardware. While "Enable multiple controllers" is on and no
+link session is active, mgba-mp serves it like this (read only, writes are ignored):
+
+| Address                     | Size | Contents |
+|-----------------------------|------|----------|
+| `0x04000160`                | 16   | Magic `0x4D50` ("MP"). Read this first to see whether the interface is present. |
+| `0x04000162 + 2*(n-2)`      | 16   | Buttons of player n, for n = 2..8 (`0x04000162` = P2 ... `0x0400016E` = P8). |
+| `0x04000170`                | 16   | Reads 0. |
+| `0x04000172 + 2*(n-1)`      | 16   | Extended buttons of player n, for n = 1..8 (`0x04000172` = P1 ... `0x04000180` = P8). |
+| `0x04000182`                | 16   | Reads 0. |
+
+- Player button words use the KEYINPUT bit layout, but **1 = pressed** (not inverted like KEYINPUT): bit 0 A, 1 B,
+  2 Select, 3 Start, 4 Right, 5 Left, 6 Up, 7 Down, 8 R, 9 L. Bits 10-15 are 0. Player 1 still reads KEYINPUT.
+- Extended button words (1 = pressed): bit 0 X, 1 Y, 2 ZL, 3 ZR, 4 L3, 5 R3, 6 Guide, 7 Back. Bits 8-15 are 0. They
+  read 0 unless "Enable extended buttons" is on.
+- A player without a gamepad reads 0.
+- 8-bit and 32-bit reads work as on other I/O registers (a 32-bit read at `0x04000160` returns the magic in the low half
+  and player 2 in the high half).
+- When the option is off or a link session is active, the whole range reads as upstream does (open bus), so the magic
+  check fails and the game can fall back to single-player or link play.
+
+### RAM-allocation cheat
+
+A cheat line of the form
+
+    alloc <address> <size>
+
+maps zero-filled RAM at `<address>` while the cheat set that contains it is enabled. Both numbers are hexadecimal
+(the `0x` prefix is optional). In a cheat file, the directive form `!alloc <address> <size>` applies to every following
+cheat set until `!reset`, like other `!` directives, and is saved as an `alloc` line in each set.
+
+- **Range:** `0x01000000`-`0x01FFFFFF`, which is unused on hardware and still reachable by DMA.
+- **Size:** 16 bytes to 1 MiB, rounded up to a power of two. The address must be aligned to the rounded size.
+  Up to 8 blocks; blocks must not overlap. Identical `alloc` lines in several sets share one block.
+- **Access:** 8, 16 and 32-bit loads and stores, LDM/STM, DMA (source and destination), and executing ARM or Thumb
+  code from it. Other cheat codes can write into it, and the debugger's memory views show it.
+- **Timing:** no wait states (1 cycle per access, 32-bit bus), like IWRAM.
+- **Savestates:** the contents are saved with the state. Loading a state restores them; a state saved without the
+  block zeroes it.
+- **Off:** disabling or removing the cheat unmaps the block, and the range behaves like upstream again (open bus,
+  writes ignored). Re-enabling it maps fresh, zeroed RAM.
+
+Example: give the game 64 KiB at `0x01000000` and set a byte in it.
+
+    # Extra RAM
+    alloc 01000000 10000
+    01000000:01
+
+---
+
 mGBA
 ====
 
