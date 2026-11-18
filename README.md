@@ -10,10 +10,11 @@ default; with both toggles off (and no alloc cheats), mgba-mp behaves like upstr
 - **Up to 8 controllers.** Player 1 is the normal mGBA input (keyboard and the selected gamepad). Players 2-8 each
   get their own gamepad. Gamepads are assigned in plug-in order: the first pad plugged in after player 1's becomes
   player 2, the next player 3, and so on. A pad plugged in later fills the lowest free player slot.
-- **Automatic bindings.** A player with nothing bound gets the default gamepad layout, so a new pad works without
-  any setup: every GBA button, with the d-pad on both the pad's d-pad and its left stick. While extended buttons are
-  on, a player whose extended buttons are all unbound also gets X, Y, ZL, ZR, L3, R3, Guide and Back filled in
-  (also right when the toggle is switched on).
+- **Automatic bindings.** For every player (player 1 included, also on top of a loaded controller profile),
+  anything left unbound gets its default: every GBA button, with the d-pad on both the pad's d-pad and its left
+  stick. A default button that is already used for something else is skipped. While extended buttons are on, unbound
+  extended buttons (X, Y, ZL, ZR, L3, R3, Guide, Back) are filled the same way, also right when the toggle is
+  switched on.
 - **Player selector.** The Controllers page of the settings has a "Controller:" box at the top that switches between
   Player 1-8. Each entry shows which gamepad that player has. The selected player's bindings are edited with the usual
   key editor.

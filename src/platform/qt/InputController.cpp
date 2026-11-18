@@ -246,26 +246,63 @@ void InputController::setConfiguration(ConfigController* config) {
 	updateExtraPlayers();
 }
 
-static void _countAxis(int, const mInputAxis*, void* user) {
-	++*static_cast<int*>(user);
+struct _AxisKeySearch {
+	int key;
+	bool found;
+};
+
+static void _findAxisKey(int, const mInputAxis* description, void* user) {
+	_AxisKeySearch* search = static_cast<_AxisKeySearch*>(user);
+	if (description->highDirection == search->key || description->lowDirection == search->key) {
+		search->found = true;
+	}
 }
 
-static void _countHat(int, const mInputHatBindings*, void* user) {
-	++*static_cast<int*>(user);
+struct _AxisFill {
+	mInputMap* map;
+	uint32_t type;
+};
+
+static void _fillAxis(int axis, const mInputAxis* description, void* user) {
+	_AxisFill* fill = static_cast<_AxisFill*>(user);
+	if (!mInputQueryAxis(fill->map, fill->type, axis)) {
+		mInputBindAxis(fill->map, fill->type, axis, description);
+	}
 }
 
-// True when the map has no binding at all for this input type, either because
-// nothing was saved or because everything was cleared.
-static bool _mapIsEmpty(const mInputMap* map, uint32_t type, int nKeys) {
+// Auto-fill: everything that is unbound gets its default. A key with no
+// button and no axis gets its default button (unless that button is already
+// used for something else), and every default axis that is free is bound, so
+// the d-pad directions end up on both the pad's d-pad and its left stick.
+static void _fillMissing(mInputMap* map, const mInputMap* defaults, uint32_t type, int nKeys) {
 	for (int key = 0; key < nKeys; ++key) {
 		if (mInputQueryBinding(map, type, key) >= 0) {
-			return false;
+			continue;
+		}
+		_AxisKeySearch search{key, false};
+		mInputEnumerateAxes(map, type, _findAxisKey, &search);
+		if (search.found) {
+			continue;
+		}
+		int button = mInputQueryBinding(defaults, type, key);
+		if (button >= 0 && mInputMapKey(map, type, button) < 0) {
+			mInputBindKey(map, type, button, key);
 		}
 	}
-	int count = 0;
-	mInputEnumerateAxes(map, type, _countAxis, &count);
-	mInputEnumerateHats(map, type, _countHat, &count);
-	return count == 0;
+	_AxisFill fill{map, type};
+	mInputEnumerateAxes(defaults, type, _fillAxis, &fill);
+}
+
+void InputController::fillPlayerDefaults(mInputMap* map, uint32_t type) {
+	auto driver = m_inputDrivers.value(type);
+	if (!driver || !driver->supportsGamepads()) {
+		return;
+	}
+	mInputMap defaults;
+	mInputMapInit(&defaults, map->info);
+	driver->bindPlayerDefaults(&defaults);
+	_fillMissing(map, &defaults, type, map->info->nKeys);
+	mInputMapDeinit(&defaults);
 }
 
 void InputController::loadPlayerConfiguration(uint32_t type) {
@@ -273,13 +310,10 @@ void InputController::loadPlayerConfiguration(uint32_t type) {
 	if (!driver || !m_config) {
 		return;
 	}
-	// Auto-fill: a player with nothing bound gets the default layout: every
-	// GBA button, with the d-pad on both the pad's d-pad and its left stick.
 	for (int player = 2; player <= MAX_CONTROLLERS; ++player) {
 		mInputMap* map = playerMap(player);
-		if (!mInputMapLoad(map, type, m_config->input()) || _mapIsEmpty(map, type, GBA_KEY_MAX)) {
-			driver->bindPlayerDefaults(map);
-		}
+		mInputMapLoad(map, type, m_config->input());
+		fillPlayerDefaults(map, type);
 	}
 	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
 		mInputMapLoad(extendedMap(player), type, m_config->input());
@@ -287,18 +321,20 @@ void InputController::loadPlayerConfiguration(uint32_t type) {
 	fillExtendedDefaults(type);
 }
 
-// With extended buttons on, players whose extended buttons are all unbound get
-// the default extended layout too, so every button is filled.
+// With extended buttons on, every unbound extended button gets its default,
+// also right when the toggle is switched on.
 void InputController::fillExtendedDefaults(uint32_t type) {
 	auto driver = m_inputDrivers.value(type);
-	if (!driver || !m_extendedButtons) {
+	if (!driver || !driver->supportsGamepads() || !m_extendedButtons) {
 		return;
 	}
 	for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
 		mInputMap* map = extendedMap(player);
-		if (_mapIsEmpty(map, type, GBA_EXT_KEY_MAX)) {
-			driver->bindExtendedDefaults(map);
-		}
+		mInputMap defaults;
+		mInputMapInit(&defaults, map->info);
+		driver->bindExtendedDefaults(&defaults);
+		_fillMissing(map, &defaults, type, map->info->nKeys);
+		mInputMapDeinit(&defaults);
 	}
 }
 
@@ -488,9 +524,10 @@ bool InputController::loadConfiguration(uint32_t type) {
 	if (!driver) {
 		return false;
 	}
-	if (!loaded || _mapIsEmpty(&m_inputMap, type, GBA_KEY_MAX)) {
+	if (!loaded) {
 		driver->bindDefaults(this);
 	}
+	fillPlayerDefaults(&m_inputMap, type);
 	driver->loadConfiguration(m_config);
 	return loaded;
 }
@@ -507,6 +544,7 @@ bool InputController::loadProfile(uint32_t type, const QString& profile) {
 			loaded = true;
 		}
 	}
+	fillPlayerDefaults(&m_inputMap, type);
 	emit profileLoaded(profile);
 	return loaded;
 }

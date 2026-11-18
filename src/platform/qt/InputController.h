@@ -175,6 +175,7 @@ private:
 
 	void updateExtraPlayers();
 	void fillExtendedDefaults(uint32_t type);
+	void fillPlayerDefaults(mInputMap* map, uint32_t type);
 	void loadPlayerConfiguration(uint32_t type);
 	QList<bool> eventButtons(uint32_t type);
 	QList<int16_t> eventAxes(uint32_t type);
