@@ -135,10 +135,17 @@ void GBAMemoryReset(struct GBA* gba) {
 		memset(gba->memory.wram, 0, GBA_SIZE_EWRAM);
 	}
 
+	// Cheat RAM goes back to its initial contents (zeros or "allocdata")
 	size_t cheatBlock;
 	for (cheatBlock = 0; cheatBlock < GBA_CHEAT_RAM_MAX_BLOCKS; ++cheatBlock) {
-		if (gba->memory.cheatRam[cheatBlock].data) {
-			memset(gba->memory.cheatRam[cheatBlock].data, 0, gba->memory.cheatRam[cheatBlock].size);
+		struct GBACheatRAMBlock* block = &gba->memory.cheatRam[cheatBlock];
+		if (!block->data) {
+			continue;
+		}
+		if (block->image) {
+			memcpy(block->data, block->image, block->size);
+		} else {
+			memset(block->data, 0, block->size);
 		}
 	}
 
@@ -2187,12 +2194,17 @@ bool GBAMemoryMapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size) {
 	}
 	freeBlock->base = base;
 	freeBlock->size = aligned;
+	freeBlock->image = NULL;
+	freeBlock->fresh = true;
+	freeBlock->restored = false;
 
 	struct GBACheatRAMBlock* pending = _cheatRamFind(memory->cheatRamPending, base, aligned);
 	if (pending) {
 		memcpy(freeBlock->data, pending->data, aligned);
 		free(pending->data);
 		memset(pending, 0, sizeof(*pending));
+		freeBlock->fresh = false;
+		freeBlock->restored = true;
 	}
 	_cheatRamRefreshActiveRegion(gba);
 	return true;
@@ -2208,6 +2220,7 @@ void GBAMemoryUnmapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size) {
 		return;
 	}
 	free(block->data);
+	free(block->image);
 	memset(block, 0, sizeof(*block));
 	_cheatRamRefreshActiveRegion(gba);
 }
@@ -2220,10 +2233,107 @@ void GBAMemoryClearCheatRAM(struct GBA* gba) {
 	size_t i;
 	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
 		free(gba->memory.cheatRam[i].data);
+		free(gba->memory.cheatRam[i].image);
 		free(gba->memory.cheatRamPending[i].data);
 	}
 	memset(gba->memory.cheatRam, 0, sizeof(gba->memory.cheatRam));
 	memset(gba->memory.cheatRamPending, 0, sizeof(gba->memory.cheatRamPending));
+}
+
+static bool _isRomRegion(uint32_t address) {
+	uint32_t region = address >> BASE_OFFSET;
+	return region >= GBA_REGION_ROM0 && region <= GBA_REGION_ROM2_EX;
+}
+
+// The CPU keeps the next two opcodes in cpu->prefetch. If memory under them
+// was just changed from outside the bus (cheat code), fetch them again so the
+// change takes effect immediately, like a store from the CPU would on the
+// next refill.
+static void _refreshPrefetch(struct GBA* gba, uint32_t address, size_t size) {
+	struct ARMCore* cpu = gba->cpu;
+	if (!cpu->memory.activeRegion || gba->memory.activeRegion < 0) {
+		return;
+	}
+	uint32_t pc = cpu->gprs[ARM_PC];
+	uint32_t width = cpu->executionMode == MODE_THUMB ? WORD_SIZE_THUMB : WORD_SIZE_ARM;
+	uint32_t start = address;
+	uint32_t pcStart = pc - width;
+	if (_isRomRegion(pc) && _isRomRegion(address)) {
+		// All ROM wait state mirrors show the same data
+		start &= GBA_SIZE_ROM0 - 1;
+		pcStart &= GBA_SIZE_ROM0 - 1;
+	} else if (pc >> BASE_OFFSET != address >> BASE_OFFSET) {
+		return;
+	}
+	if (!(pcStart < start + size && start < pcStart + 2 * width)) {
+		return;
+	}
+	if (width == WORD_SIZE_THUMB) {
+		LOAD_16(cpu->prefetch[0], (pc - width) & cpu->memory.activeMask, cpu->memory.activeRegion);
+		LOAD_16(cpu->prefetch[1], pc & cpu->memory.activeMask, cpu->memory.activeRegion);
+	} else {
+		LOAD_32(cpu->prefetch[0], (pc - width) & cpu->memory.activeMask, cpu->memory.activeRegion);
+		LOAD_32(cpu->prefetch[1], pc & cpu->memory.activeMask, cpu->memory.activeRegion);
+	}
+}
+
+// Sets the contents a block gets on reset (copied; NULL = zeros). The live
+// contents are not touched.
+void GBAMemorySetCheatRAMImage(struct GBA* gba, struct GBACheatRAMBlock* block, const uint8_t* image) {
+	UNUSED(gba);
+	if (!block->data) {
+		return;
+	}
+	if (!image) {
+		free(block->image);
+		block->image = NULL;
+		return;
+	}
+	if (!block->image) {
+		block->image = malloc(block->size);
+		if (!block->image) {
+			return;
+		}
+	}
+	memcpy(block->image, image, block->size);
+}
+
+// Writes into a mapped cheat RAM block (must fit in one block)
+void GBAMemoryWriteCheatRAM(struct GBA* gba, uint32_t address, const void* data, size_t size) {
+	struct GBACheatRAMBlock* block = _cheatRamLookup(&gba->memory, address);
+	if (!block || !size || address - block->base + size > block->size) {
+		return;
+	}
+	memcpy(&block->data[address - block->base], data, size);
+	_refreshPrefetch(gba, address, size);
+}
+
+// Overwrites size bytes of the cartridge ROM at address (any ROM mirror),
+// optionally returning the previous bytes in old. Writing past the end of
+// the ROM grows it, as other ROM patches do.
+bool GBAMemoryPatchROM(struct GBA* gba, uint32_t address, const void* data, size_t size, void* old) {
+	if (!gba->memory.rom || !size || !_isRomRegion(address)) {
+		return false;
+	}
+	uint32_t offset = address & (GBA_SIZE_ROM0 - 1);
+	if (size > GBA_SIZE_ROM0 - offset) {
+		return false;
+	}
+	_pristineCow(gba);
+	uint8_t* rom = (uint8_t*) gba->memory.rom;
+	if (old) {
+		memcpy(old, &rom[offset], size);
+	}
+	memcpy(&rom[offset], data, size);
+	if (offset + size > gba->memory.romSize) {
+		gba->memory.romSize = offset + size;
+		gba->memory.romMask = toPow2(gba->memory.romSize) - 1;
+		if (gba->cpu->memory.activeRegion == gba->memory.rom) {
+			gba->cpu->memory.activeMask = gba->memory.romMask;
+		}
+	}
+	_refreshPrefetch(gba, GBA_BASE_ROM0 | offset, size);
+	return true;
 }
 
 // Savestate extdata layout (little endian):
@@ -2269,11 +2379,20 @@ bool GBAMemoryDeserializeCheatRAM(struct GBA* gba, const void* buffer, size_t si
 		free(gba->memory.cheatRamPending[i].data);
 	}
 	memset(gba->memory.cheatRamPending, 0, sizeof(gba->memory.cheatRamPending));
-	// Blocks the state does not mention start out zeroed
+	// Blocks the state does not mention start out with their initial
+	// contents (zeros, or the "allocdata" image)
 	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
-		if (gba->memory.cheatRam[i].data) {
-			memset(gba->memory.cheatRam[i].data, 0, gba->memory.cheatRam[i].size);
+		struct GBACheatRAMBlock* block = &gba->memory.cheatRam[i];
+		if (!block->data) {
+			continue;
 		}
+		if (block->image) {
+			memcpy(block->data, block->image, block->size);
+		} else {
+			memset(block->data, 0, block->size);
+		}
+		block->fresh = false;
+		block->restored = true;
 	}
 	if (!buffer) {
 		return true;

@@ -113,6 +113,12 @@ struct GBACheatRAMBlock {
 	uint32_t base;
 	uint32_t size;
 	uint8_t* data;
+	// Initial contents ("allocdata" codes), restored on reset; NULL = zeros
+	uint8_t* image;
+	// Set when the block was just mapped zero-filled, or when its contents
+	// came from a savestate; consumed by the cheat code (see cheats.c)
+	bool fresh;
+	bool restored;
 };
 
 struct GBAMemory {
@@ -197,6 +203,9 @@ bool GBAMemoryMapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size);
 void GBAMemoryUnmapCheatRAM(struct GBA* gba, uint32_t base, uint32_t size);
 struct GBACheatRAMBlock* GBAMemoryCheatRAMLookup(struct GBAMemory* memory, uint32_t address);
 void GBAMemoryClearCheatRAM(struct GBA* gba);
+void GBAMemorySetCheatRAMImage(struct GBA* gba, struct GBACheatRAMBlock* block, const uint8_t* image);
+void GBAMemoryWriteCheatRAM(struct GBA* gba, uint32_t address, const void* data, size_t size);
+bool GBAMemoryPatchROM(struct GBA* gba, uint32_t address, const void* data, size_t size, void* old);
 void GBAMemorySerializeCheatRAM(struct GBA* gba, void** buffer, size_t* size);
 bool GBAMemoryDeserializeCheatRAM(struct GBA* gba, const void* buffer, size_t size);
 
