@@ -15,6 +15,9 @@ CXX_GUARD_START
 #include <mgba-util/table.h>
 #include <mgba-util/vector.h>
 
+// Longest line (without the line break) the cheat file parser reads
+#define mCHEAT_MAX_LINE_LENGTH 511
+
 enum mCheatType {
 	CHEAT_ASSIGN,
 	CHEAT_ASSIGN_INDIRECT,

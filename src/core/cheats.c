@@ -9,7 +9,7 @@
 #include <mgba-util/string.h>
 #include <mgba-util/vfs.h>
 
-#define MAX_LINE_LENGTH 512
+#define MAX_LINE_LENGTH (mCHEAT_MAX_LINE_LENGTH + 1)
 #define MAX_CHEATS 1000
 
 const uint32_t M_CHEAT_DEVICE_ID = 0xABADC0DE;
@@ -186,7 +186,9 @@ void mCheatDeviceDestroy(struct mCheatDevice* device) {
 
 void mCheatDeviceClear(struct mCheatDevice* device) {
 	size_t i;
-	for (i = 0; i < mCheatSetsSize(&device->cheats); ++i) {
+	// Newest last in, first out: sets that undo memory patches when freed
+	// then restore the exact original bytes even where patches overlap
+	for (i = mCheatSetsSize(&device->cheats); i--;) {
 		struct mCheatSet* set = *mCheatSetsGetPointer(&device->cheats, i);
 		mCheatSetDeinit(set);
 	}
@@ -274,6 +276,7 @@ bool mCheatParseFile(struct mCheatDevice* device, struct VFile* vf) {
 	while (true) {
 		size_t i = 0;
 		ssize_t bytesRead = vf->readline(vf, cheat, sizeof(cheat));
+		bool truncated = bytesRead > 0 && (size_t) bytesRead == sizeof(cheat) - 1 && cheat[bytesRead - 1] != '\n';
 		rtrim(cheat);
 		if (bytesRead == 0) {
 			break;
@@ -281,6 +284,21 @@ bool mCheatParseFile(struct mCheatDevice* device, struct VFile* vf) {
 		if (bytesRead < 0) {
 			StringListDeinit(&directives);
 			return false;
+		}
+		if (truncated) {
+			// The buffer filled up: drop the whole line rather than parsing
+			// its tail as a separate (probably bogus) code
+			size_t extra = 0;
+			char c;
+			while (vf->read(vf, &c, 1) == 1 && c != '\n') {
+				if (c != '\r') {
+					++extra;
+				}
+			}
+			if (extra) {
+				mLOG(CHEATS, ERROR, "Cheat line too long (over %i characters), skipped", mCHEAT_MAX_LINE_LENGTH);
+				continue;
+			}
 		}
 		while (isspace((unsigned) cheat[i])) {
 			++i;
