@@ -151,14 +151,29 @@ void CheatsView::enterCheat() {
 		index = m_model.index(m_model.rowCount() - 1, 0, QModelIndex());
 		m_ui.cheatList->selectionModel()->select(index, QItemSelectionModel::SelectCurrent | QItemSelectionModel::Rows);
 	}
+	// Lines with a keyword and arguments ("alloc", "allocdata", "rompatch")
+	// are added whole; everything else is split into words below
+	QRegularExpression keywordLine("^\\s*(alloc|allocdata|rompatch)\\s", QRegularExpression::CaseInsensitiveOption);
+	QString codes;
+	int failure = 0;
+	for (const QString& line : m_ui.codeEntry->toPlainText().split('\n')) {
+		if (!keywordLine.match(line).hasMatch()) {
+			codes += line + "\n";
+			continue;
+		}
+		m_model.beginAppendRow(index);
+		if (!mCheatAddLine(set, line.trimmed().toUtf8().constData(), m_codeType)) {
+			++failure;
+		}
+		m_model.endAppendRow();
+	}
 	// TODO: Update API to handle this splitting in the core
 	QRegularExpression regexp("\\s");
 #if (QT_VERSION >= QT_VERSION_CHECK(5, 14, 0))
-	QStringList cheats = m_ui.codeEntry->toPlainText().split(regexp, Qt::SkipEmptyParts);
+	QStringList cheats = codes.split(regexp, Qt::SkipEmptyParts);
 #else
-	QStringList cheats = m_ui.codeEntry->toPlainText().split(regexp, QString::SkipEmptyParts);
+	QStringList cheats = codes.split(regexp, QString::SkipEmptyParts);
 #endif
-	int failure = 0;
 	QString buffer;
 	for (const QString& string : cheats) {
 		m_model.beginAppendRow(index);
