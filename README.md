@@ -2,7 +2,7 @@ mgba-mp
 =======
 
 mgba-mp is a fork of mGBA that adds local multi-controller support for Game Boy Advance games (and ROM hacks) that
-are written to use it, plus a cheat code type that gives a game extra RAM. Multiple controllers and extended buttons are on by
+are written to use it, plus cheat code types that give a game extra RAM and let a whole ROM hack ship as one cheat file. Multiple controllers and extended buttons are on by
 default; with both toggles off (and no alloc cheats), mgba-mp behaves like upstream mGBA. The upstream README follows below.
 
 ### What it adds
@@ -32,6 +32,8 @@ default; with both toggles off (and no alloc cheats), mgba-mp behaves like upstr
   behaves exactly like upstream. The Controllers page shows a note and greys out the toggles.
 - **RAM-allocation cheat.** A cheat line can map extra RAM into an address range that is unused on real hardware.
   See below.
+- **ROM hacks as cheat files.** The extra RAM can come with initial contents (code and data), and ROM patches of
+  any length and number can be listed in the same cheat set, so a hack needs no IPS/UPS patch. See below.
 
 ### Using it
 
@@ -82,13 +84,71 @@ cheat set until `!reset`, like other `!` directives, and is saved as an `alloc` 
 - **Savestates:** the contents are saved with the state. Loading a state restores them; a state saved without the
   block zeroes it.
 - **Off:** disabling or removing the cheat unmaps the block, and the range behaves like upstream again (open bus,
-  writes ignored). Re-enabling it maps fresh, zeroed RAM.
+  writes ignored). Re-enabling it maps fresh RAM with its initial contents (zeros, or the `allocdata` below).
+- **Reset:** a reset fills the block with its initial contents again.
 
 Example: give the game 64 KiB at `0x01000000` and set a byte in it.
 
     # Extra RAM
     alloc 01000000 10000
     01000000:01
+
+### ROM hacks in a cheat file
+
+Two more line types let one cheat set carry a complete ROM hack: code and data for the allocated RAM, and the ROM
+changes that hook into it.
+
+    allocdata <address> <bytes>
+    rompatch <address> <bytes>
+
+`<address>` is hexadecimal (optional `0x`). `<bytes>` are the bytes in memory order, two hex digits each, optionally
+separated by spaces (`E3A00042` and `E3 A0 00 42` are the same four bytes; for a 32-bit ARM word `0xE3A00042`
+write `4200A0E3`). Keywords are case-insensitive.
+
+**`allocdata`** sets initial contents of an `alloc` block of the same cheat set. The `alloc` line (or `!alloc`
+directive) must come first, and the bytes must lie inside that block (after the size is rounded up). The rest of the
+block stays zero; later lines win where lines overlap.
+
+- The data is written when the block is mapped: when the game starts with the set enabled, and when the set is
+  enabled later. A reset writes it again (the whole block goes back to its initial contents), so code is always
+  present after a reset.
+- Savestates store the block's current contents. Loading a state keeps them (initialised variables are not reset by
+  the load, also when the state carries its own copy of the cheats); a state saved without the block gives it its
+  initial contents.
+- An `allocdata` line added to a set that is already on is written right away. If several enabled sets share one
+  block, enabling another one writes only its own lines.
+
+**`rompatch`** replaces cartridge ROM bytes while its set is enabled.
+
+- The address may use any ROM mirror (`0x08000000`-`0x0DFFFFFF`); the bytes must end inside the 32 MiB ROM space.
+  Patching past the end of the loaded ROM makes the ROM larger, as other ROM patch codes do.
+- No limit on length or count, apart from the line length below. The bytes are visible at once to all CPU reads,
+  DMA, the debugger, and instruction fetch (including opcodes the CPU had already fetched).
+- Disabling or removing the set puts back exactly the original bytes. Overlapping `rompatch` lines (also from
+  different sets) are undone newest first, so the bytes always end up correct. Do not overlap them with GameShark /
+  Action Replay / CodeBreaker ROM patch codes, which keep their own copy of the original bytes.
+- Existing ROM patch codes (for example `!GSAv1 raw` sets) keep working and can be in the same file.
+
+**Order.** When a set has both, its `alloc` blocks are mapped and filled before its ROM patches are written, and
+on disable the ROM patches are undone before the blocks are unmapped. This happens between two CPU instructions
+(at the end of a frame, or while the emulator is paused by the cheats window). If the CPU is executing inside a
+block at that moment, the block stays mapped until it has left it (checked every frame), so a hook that is running
+can return to the (now original) ROM code. Code still on the call stack inside the block cannot be detected.
+
+**Limits.** A cheat file line may be at most 511 characters; longer `allocdata`/`rompatch` lines are refused (in
+the cheats window too), and an over-long line in a cheat file is skipped as a whole. That is up to 246 bytes per line
+without spaces; 128 bytes per line is a convenient size. A 64 KiB block needs about 512 `allocdata` lines. The
+cheats window saves these lines unchanged; adding codes to such a set there keeps them. In the cheats window's code
+box, `alloc`, `allocdata` and `rompatch` lines are added as whole lines.
+
+Example: a 64 KiB block with a small Thumb routine and some data, a ROM hook that jumps to the routine (`ldr r3, [pc]; bx r3` with the Thumb address `0x01000001`), and a few bytes placed in free ROM space.
+
+    # My hack
+    alloc 01000000 10000
+    allocdata 01000000 0120 7047
+    allocdata 01008000 00 00 00 00 FF FF
+    rompatch 080001C0 00 4B 18 47 01 00 00 01
+    rompatch 08F00000 0123456789ABCDEF
 
 ---
 
