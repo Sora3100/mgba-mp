@@ -109,6 +109,9 @@ void mSDLEventsLoadConfig(struct mSDLEvents*, const struct Configuration*);
 void mSDLPlayerChangeJoystick(struct mSDLEvents*, struct mSDLPlayer*, size_t index);
 void mSDLPlayerChangeId(struct mSDLEvents*, struct mSDLPlayer*, int id);
 void mSDLUpdateJoysticks(struct mSDLEvents* events, const struct Configuration*);
+// Gives every listed (attached) player without a joystick the first joystick
+// no attached player uses, in list order. Returns how many were assigned.
+size_t mSDLAssignFreeJoysticks(struct mSDLEvents* events, struct mSDLPlayer* const* players, size_t nPlayers);
 
 void mSDLPlayerLoadConfig(struct mSDLPlayer*, const struct Configuration*);
 void mSDLPlayerSaveConfig(const struct mSDLPlayer*, struct Configuration*);

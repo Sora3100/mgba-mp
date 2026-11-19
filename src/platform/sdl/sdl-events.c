@@ -223,6 +223,39 @@ void mSDLInitBindingsGBA(struct mInputMap* inputMap) {
 #endif
 }
 
+static bool _mSDLJoystickClaimed(const struct mSDLEvents* events, const struct SDL_JoystickCombo* joystick) {
+	int p;
+	for (p = 0; p < MAX_PLAYERS; ++p) {
+		if (events->players[p] && events->players[p]->joystick == joystick) {
+			return true;
+		}
+	}
+	return false;
+}
+
+size_t mSDLAssignFreeJoysticks(struct mSDLEvents* events, struct mSDLPlayer* const* players, size_t nPlayers) {
+	size_t assigned = 0;
+	size_t p;
+	for (p = 0; p < nPlayers; ++p) {
+		struct mSDLPlayer* player = players[p];
+		if (!player || player->joystick || player->playerId >= MAX_PLAYERS || events->players[player->playerId] != player) {
+			continue;
+		}
+		size_t i;
+		for (i = 0; i < SDL_JoystickListSize(&events->joysticks); ++i) {
+			struct SDL_JoystickCombo* joystick = SDL_JoystickListGetPointer(&events->joysticks, i);
+			if (_mSDLJoystickClaimed(events, joystick)) {
+				continue;
+			}
+			mLOG(SDL_EVENTS, DEBUG, "Free joystick %" PRIz "u assigned to player slot %" PRIz "u", i, player->playerId);
+			player->joystick = joystick;
+			++assigned;
+			break;
+		}
+	}
+	return assigned;
+}
+
 bool mSDLAttachPlayer(struct mSDLEvents* events, struct mSDLPlayer* player, int playerId) {
 	player->joystick = 0;
 
@@ -493,16 +526,22 @@ void mSDLUpdateJoysticks(struct mSDLEvents* events, const struct Configuration* 
 				events->players[i]->joystick = NULL;
 			}
 			struct SDL_JoystickCombo* joystick = _mSDLOpenJoystick(events, event.jdevice.which);
-			if (!joystick) {
-				mLOG(SDL_EVENTS, ERROR, "SDL joystick hotplug attach failed: %s", SDL_GetError());
-				continue;
-			}
 
 			// First pass: refresh existing controller pointers
 			for (i = 0; i < MAX_PLAYERS; ++i) {
 				if (joysticks[i] != -1) {
 					events->players[i]->joystick = SDL_JoystickListGetPointer(&events->joysticks, joysticks[i]);
 				}
+			}
+
+			if (!joystick) {
+				mLOG(SDL_EVENTS, ERROR, "SDL joystick hotplug attach failed: %s", SDL_GetError());
+				continue;
+			}
+			if (_mSDLJoystickClaimed(events, joystick)) {
+				// Already open and in use (e.g. an add event for a device that
+				// was opened at startup): never hand one pad to two players
+				continue;
 			}
 
 			char joystickName[34] = {0};
@@ -516,6 +555,7 @@ void mSDLUpdateJoysticks(struct mSDLEvents* events, const struct Configuration* 
 			SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick->joystick), joystickName, sizeof(joystickName));
 #endif
 			// Second pass: see if new controller matches preferred one for any player missing a controller
+			bool matched = false;
 			for (i = 0; i < MAX_PLAYERS; ++i) {
 				if (!events->players[i] || events->players[i]->joystick) {
 					continue;
@@ -523,7 +563,7 @@ void mSDLUpdateJoysticks(struct mSDLEvents* events, const struct Configuration* 
 				if (!events->preferredJoysticks[i].type || strcmp(events->preferredJoysticks[i].type, joystickName) != 0) {
 					continue;
 				}
-				if (events->preferredJoysticks[i].serial && strcmp(events->preferredJoysticks[i].serial, serial) != 0) {
+				if (events->preferredJoysticks[i].serial && (!serial || strcmp(events->preferredJoysticks[i].serial, serial) != 0)) {
 					continue;
 				}
 				mLOG(SDL_EVENTS, DEBUG, "Joystick matched player %" PRIz "i preferred device", i + 1);
@@ -531,7 +571,12 @@ void mSDLUpdateJoysticks(struct mSDLEvents* events, const struct Configuration* 
 				if (config && joystickName[0]) {
 					mSDLJoystickLoad(events->players[i], config, joystickName);
 				}
-				return;
+				matched = true;
+				break;
+			}
+			if (matched) {
+				// Keep handling the remaining queued hotplug events
+				continue;
 			}
 
 			// Third pass: if not, give it to the first player missing a controller
