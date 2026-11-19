@@ -77,7 +77,8 @@ ControllersView::ControllersView(ConfigController* config, InputController* cont
 	connect(m_playerSelect, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this, &ControllersView::selectPlayer);
 	connect(m_multiController, &QAbstractButton::toggled, this, &ControllersView::updateEnabled);
 	connect(m_extendedButtons, &QAbstractButton::toggled, this, &ControllersView::updateEnabled);
-	connect(controller, &InputController::playersChanged, this, &ControllersView::updatePlayers);
+	// Queued: the signal can come from inside a pad dropdown's own change handler
+	connect(controller, &InputController::playersChanged, this, &ControllersView::updatePlayers, Qt::QueuedConnection);
 
 	updatePlayers();
 	updateEnabled();
@@ -95,15 +96,26 @@ void ControllersView::updatePlayers() {
 	int current = m_playerSelect->currentIndex();
 	bool wasBlocked = m_playerSelect->blockSignals(true);
 	m_playerSelect->clear();
+	QStringList names = m_controller->connectedGamepads(m_type);
 	for (int player = 1; player <= InputController::MAX_CONTROLLERS; ++player) {
-		QString pad = m_controller->playerGamepadName(player, m_type);
-		if (pad.isEmpty()) {
+		int index = m_controller->playerGamepadIndex(player, m_type);
+		QString pad;
+		if (index >= 0 && index < names.count()) {
+			// Numbered like the pad dropdown, so identical pads can be told apart
+			pad = tr("%1: %2").arg(index + 1).arg(names[index]);
+		} else {
 			pad = tr("no controller");
 		}
 		m_playerSelect->addItem(tr("Player %1 (%2)").arg(player).arg(pad));
 	}
 	m_playerSelect->setCurrentIndex(current < 0 ? 0 : current);
 	m_playerSelect->blockSignals(wasBlocked);
+
+	// Every player's pad dropdown shows who holds which pad, so all of them
+	// change when one assignment does
+	for (GBAKeyEditor* editor : m_editors) {
+		editor->refreshGamepads();
+	}
 }
 
 void ControllersView::updateEnabled() {

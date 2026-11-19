@@ -129,6 +129,10 @@ public:
 	void pollPlayers(uint16_t* keys, uint16_t* extendedKeys);
 
 	QString playerGamepadName(int player, uint32_t type = 0);
+	// Connected pads as "N: name", with the player holding each one appended
+	// while multiple controllers are active (identical pads look alike otherwise)
+	QStringList gamepadLabels(uint32_t type = 0);
+	int playerGamepadSlotIndex(int player, uint32_t type = 0);
 	int playerGamepadIndex(int player, uint32_t type = 0);
 	void setPlayerGamepad(int player, uint32_t type, int index);
 

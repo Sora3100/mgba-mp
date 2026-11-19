@@ -460,6 +460,38 @@ QString InputController::playerGamepadName(int player, uint32_t type) {
 	return driver->playerGamepadName(player);
 }
 
+int InputController::playerGamepadSlotIndex(int player, uint32_t type) {
+	if (player <= 1) {
+		return gamepadIndex(type);
+	}
+	return playerGamepadIndex(player, type);
+}
+
+QStringList InputController::gamepadLabels(uint32_t type) {
+	QStringList names = connectedGamepads(type);
+	QList<QStringList> holders;
+	for (int i = 0; i < names.count(); ++i) {
+		holders.append(QStringList());
+	}
+	if (multiControllerActive()) {
+		for (int player = 1; player <= MAX_CONTROLLERS; ++player) {
+			int index = playerGamepadIndex(player, type);
+			if (index >= 0 && index < names.count()) {
+				holders[index].append(tr("Player %1").arg(player));
+			}
+		}
+	}
+	QStringList labels;
+	for (int i = 0; i < names.count(); ++i) {
+		QString label = tr("%1: %2").arg(i + 1).arg(names[i]);
+		if (!holders[i].isEmpty()) {
+			label = tr("%1 (%2)").arg(label).arg(holders[i].join(QLatin1String(", ")));
+		}
+		labels.append(label);
+	}
+	return labels;
+}
+
 int InputController::playerGamepadIndex(int player, uint32_t type) {
 	if (!type) {
 		type = m_gamepadDriver;
@@ -626,6 +658,8 @@ void InputController::setGamepad(uint32_t type, int index) {
 		return;
 	}
 	driver->setActiveGamepad(index);
+	// Player 1 may have swapped pads with another player
+	emit playersChanged();
 }
 
 void InputController::setGamepad(int index) {

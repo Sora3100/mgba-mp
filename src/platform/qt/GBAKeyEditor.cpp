@@ -58,6 +58,7 @@ GBAKeyEditor::GBAKeyEditor(InputController* controller, int type, const QString&
 #ifdef BUILD_SDL
 	if (type == SDL_BINDING_BUTTON || type == SDL_BINDING_CONTROLLER) {
 		m_profileSelect = new QComboBox(this);
+		m_profileSelect->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 		connect(m_profileSelect, static_cast<void(QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
 		        this, &GBAKeyEditor::selectGamepad);
 
@@ -377,9 +378,34 @@ void GBAKeyEditor::selectGamepad(int index) {
 		return;
 	}
 	m_controller->setGamepad(m_type, index);
-	m_profile = m_profileSelect->currentText();
+	// The entries are labels ("N: name (Player k)"); the profile is the pad's name
+	QStringList names = m_controller->connectedGamepads(m_type);
+	m_profile = index >= 0 && index < names.count() ? names[index] : QString();
 	m_controller->loadProfile(m_type, m_profile);
 	refresh();
+}
+
+void GBAKeyEditor::refreshGamepads() {
+	if (!m_profileSelect) {
+		return;
+	}
+	int index = m_controller->playerGamepadSlotIndex(m_player, m_type);
+	auto wasBlocked = m_profileSelect->blockSignals(true);
+	m_profileSelect->clear();
+	m_profileSelect->addItems(m_controller->gamepadLabels(m_type));
+	m_profileSelect->setCurrentIndex(index);
+	m_profileSelect->blockSignals(wasBlocked);
+	setLocation(m_profileSelect, 0.5, 0.67);
+	if (index != m_shownGamepad) {
+		// This player's pad changed (swap, hotplug): show the bindings that
+		// are now in effect for it
+		m_shownGamepad = index;
+		if (m_player <= 1) {
+			m_profile = index >= 0 ? m_controller->connectedGamepads(m_type).value(index) : QString();
+			m_controller->loadProfile(m_type, m_profile);
+		}
+		refresh();
+	}
 }
 #endif
 
@@ -425,10 +451,12 @@ void GBAKeyEditor::updateJoysticks() {
 	// Block the currentIndexChanged signal while rearranging the combo box
 	auto wasBlocked = m_profileSelect->blockSignals(true);
 	m_profileSelect->clear();
-	m_profileSelect->addItems(m_controller->connectedGamepads(m_type));
-	int activeGamepad = m_player > 1 ? m_controller->playerGamepadIndex(m_player, m_type) : m_controller->gamepadIndex(m_type);
+	m_profileSelect->addItems(m_controller->gamepadLabels(m_type));
+	int activeGamepad = m_controller->playerGamepadSlotIndex(m_player, m_type);
 	m_profileSelect->setCurrentIndex(activeGamepad);
 	m_profileSelect->blockSignals(wasBlocked);
+	setLocation(m_profileSelect, 0.5, 0.67);
+	m_shownGamepad = activeGamepad;
 
 	selectGamepad(activeGamepad);
 }

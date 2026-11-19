@@ -34,6 +34,8 @@ public slots:
 	void save();
 #ifdef BUILD_SDL
 	void updateJoysticks();
+	// Re-reads the pad list and this player's pad without reassigning anything
+	void refreshGamepads();
 #endif
 
 protected:
@@ -90,6 +92,7 @@ private:
 	QString m_profile;
 	InputController* m_controller;
 	int m_player;
+	int m_shownGamepad = -2;
 
 	QPicture m_background;
 };
