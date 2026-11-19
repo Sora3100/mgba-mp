@@ -144,6 +144,19 @@ struct GBACheatHook {
 
 DECLARE_VECTOR(GBACheatPatchList, struct GBACheatPatch);
 
+// "allocdata" (initial cheat RAM contents) and "rompatch" (ROM bytes) lines
+struct GBACheatData {
+	uint32_t address;
+	uint32_t size;
+	// size bytes of data; ROM patches keep the replaced bytes right after it
+	uint8_t* data;
+	uint32_t seq; // ROM patches: application order, reverted newest first
+	bool applied; // in effect (follows the set's enabled flag)
+	bool written; // ROM patches: really written (needs a loaded ROM)
+};
+
+DECLARE_VECTOR(GBACheatDataList, struct GBACheatData);
+
 struct GBACheatSet {
 	struct mCheatSet d;
 	struct GBACheatHook* hook;
@@ -166,6 +179,15 @@ struct GBACheatSet {
 		uint32_t size;
 	} allocs[GBA_CHEAT_RAM_MAX_BLOCKS];
 	size_t nAllocs;
+	struct GBACheatDataList allocData;
+	struct GBACheatDataList romData;
+	// Where romData was written, so a set freed without being removed
+	// (mCheatDeviceClear) can still put the ROM back
+	struct GBA* romTarget;
+	uint32_t romCrc; // CRC32 of the ROM romData was written to
+	// Between the device's add and remove callbacks; on detach every set gets
+	// "remove" while staying in the list, so enabled alone is not enough
+	bool attached;
 };
 
 struct VFile;
@@ -173,6 +195,8 @@ struct VFile;
 struct mCheatDevice* GBACheatDeviceCreate(void);
 
 bool GBACheatAddAllocLine(struct GBACheatSet*, const char* line);
+bool GBACheatAddAllocDataLine(struct GBACheatSet*, const char* line);
+bool GBACheatAddROMPatchLine(struct GBACheatSet*, const char* line);
 void GBACheatSyncAllocations(struct mCheatDevice*);
 
 bool GBACheatAddCodeBreaker(struct GBACheatSet*, uint32_t op1, uint16_t op2);

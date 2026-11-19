@@ -13,6 +13,18 @@
 
 #define MAX_LINE_LENGTH 128
 
+DEFINE_VECTOR(GBACheatDataList, struct GBACheatData);
+
+// Order in which "rompatch" lines were written, so they can be undone newest
+// first and overlapping patches restore the exact original bytes
+static uint32_t _romPatchSeq = 0;
+
+static void _sync(struct mCheatDevice* device, struct GBACheatSet* removed, bool full);
+
+static bool _active(const struct GBACheatSet* set) {
+	return set->attached && set->d.enabled;
+}
+
 static void _addBreakpoint(struct mCheatDevice* device, struct GBACheatSet* cheats) {
 	if (!device->p || !cheats->hook) {
 		return;
@@ -57,6 +69,11 @@ static struct mCheatSet* GBACheatSetCreate(struct mCheatDevice* device, const ch
 	set->remainingAddresses = 0;
 	set->hook = NULL;
 	set->nAllocs = 0;
+	GBACheatDataListInit(&set->allocData, 0);
+	GBACheatDataListInit(&set->romData, 0);
+	set->romTarget = NULL;
+	set->romCrc = 0;
+	set->attached = false;
 
 	set->d.deinit = GBACheatSetDeinit;
 	set->d.add = GBACheatAddSet;
@@ -80,6 +97,20 @@ struct mCheatDevice* GBACheatDeviceCreate(void) {
 	return device;
 }
 
+static bool _romStillThere(struct GBACheatSet* set) {
+	struct GBA* gba = set->romTarget;
+	// Never "restore" bytes into a different ROM loaded in the meantime
+	return gba && gba->memory.rom && gba->romCrc32 == set->romCrc;
+}
+
+static void _revertROMPatch(struct GBACheatSet* set, struct GBACheatData* patch) {
+	if (patch->written && _romStillThere(set)) {
+		GBAMemoryPatchROM(set->romTarget, patch->address, &patch->data[patch->size], patch->size, NULL);
+	}
+	patch->written = false;
+	patch->applied = false;
+}
+
 static void GBACheatSetDeinit(struct mCheatSet* set) {
 	struct GBACheatSet* gbaset = (struct GBACheatSet*) set;
 	if (gbaset->hook) {
@@ -88,18 +119,34 @@ static void GBACheatSetDeinit(struct mCheatSet* set) {
 			free(gbaset->hook);
 		}
 	}
+	size_t i;
+	// Freed while still in effect (mCheatDeviceClear): undo our ROM bytes
+	for (i = GBACheatDataListSize(&gbaset->romData); i--;) {
+		struct GBACheatData* patch = GBACheatDataListGetPointer(&gbaset->romData, i);
+		if (patch->applied) {
+			_revertROMPatch(gbaset, patch);
+		}
+		free(patch->data);
+	}
+	for (i = 0; i < GBACheatDataListSize(&gbaset->allocData); ++i) {
+		free(GBACheatDataListGetPointer(&gbaset->allocData, i)->data);
+	}
+	GBACheatDataListDeinit(&gbaset->romData);
+	GBACheatDataListDeinit(&gbaset->allocData);
 }
 
 static void GBACheatAddSet(struct mCheatSet* cheats, struct mCheatDevice* device) {
 	struct GBACheatSet* gbaset = (struct GBACheatSet*) cheats;
 	_addBreakpoint(device, gbaset);
-	GBACheatSyncAllocations(device);
+	gbaset->attached = true;
+	_sync(device, NULL, false);
 }
 
 static void GBACheatRemoveSet(struct mCheatSet* cheats, struct mCheatDevice* device) {
 	struct GBACheatSet* gbaset = (struct GBACheatSet*) cheats;
 	_removeBreakpoint(device, gbaset);
-	GBACheatSyncAllocations(device);
+	gbaset->attached = false;
+	_sync(device, gbaset, true);
 }
 
 static const char* _skipSpace(const char* str) {
@@ -165,7 +212,7 @@ static bool _allocWanted(struct mCheatDevice* device, uint32_t base, uint32_t si
 	size_t s;
 	for (s = 0; s < mCheatSetsSize(&device->cheats); ++s) {
 		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
-		if (!set->d.enabled) {
+		if (!_active(set)) {
 			continue;
 		}
 		size_t i;
@@ -178,31 +225,362 @@ static bool _allocWanted(struct mCheatDevice* device, uint32_t base, uint32_t si
 	return false;
 }
 
-// Makes the mapped cheat RAM match the allocations of the enabled sets:
-// blocks nobody asks for any more are unmapped (back to open bus), new ones
-// are mapped zero-filled (or with contents from a loaded savestate)
-void GBACheatSyncAllocations(struct mCheatDevice* device) {
+// Parses "<keyword> <address> <hex bytes>"; the bytes are pairs of hex
+// digits, optionally separated by whitespace. Allocates factor * size bytes.
+static bool _parseDataLine(const char* line, const char* keyword, size_t factor, uint32_t* address, uint32_t* size, uint8_t** data) {
+	// Longer lines would not survive saving and reloading the cheat file
+	if (strlen(line) > mCHEAT_MAX_LINE_LENGTH) {
+		return false;
+	}
+	size_t keywordLength = strlen(keyword);
+	line = _skipSpace(line);
+	if (strncasecmp(line, keyword, keywordLength) != 0 || !isspace((int) line[keywordLength])) {
+		return false;
+	}
+	line = _parseAllocNumber(&line[keywordLength], address);
+	if (!line || !isspace((int) line[0])) {
+		return false;
+	}
+	size_t count = 0;
+	const char* bytes = line;
+	while (true) {
+		bytes = _skipSpace(bytes);
+		if (!bytes[0]) {
+			break;
+		}
+		if (!isxdigit((int) bytes[0]) || !isxdigit((int) bytes[1])) {
+			return false;
+		}
+		bytes += 2;
+		++count;
+	}
+	if (!count) {
+		return false;
+	}
+	uint8_t* out = calloc(factor, count);
+	if (!out) {
+		return false;
+	}
+	size_t i;
+	bytes = line;
+	for (i = 0; i < count; ++i) {
+		bytes = _skipSpace(bytes);
+		out[i] = (hexDigit(bytes[0]) << 4) | hexDigit(bytes[1]);
+		bytes += 2;
+	}
+	*size = count;
+	*data = out;
+	return true;
+}
+
+// Syntax: "allocdata <address> <hex bytes>": initial contents for an
+// "alloc" block of the same set (the alloc line must come first)
+bool GBACheatAddAllocDataLine(struct GBACheatSet* cheats, const char* line) {
+	uint32_t address;
+	uint32_t size;
+	uint8_t* data;
+	if (!_parseDataLine(line, "allocdata", 1, &address, &size, &data)) {
+		return false;
+	}
+	size_t i;
+	for (i = 0; i < cheats->nAllocs; ++i) {
+		const struct GBACheatAlloc* alloc = &cheats->allocs[i];
+		if (address - alloc->base < alloc->size && size <= alloc->size - (address - alloc->base)) {
+			break;
+		}
+	}
+	if (i == cheats->nAllocs) {
+		mLOG(CHEATS, ERROR, "allocdata 0x%08X+0x%X does not fit in an alloc block of its cheat", address, size);
+		free(data);
+		return false;
+	}
+	struct GBACheatData* entry = GBACheatDataListAppend(&cheats->allocData);
+	memset(entry, 0, sizeof(*entry));
+	entry->address = address;
+	entry->size = size;
+	entry->data = data;
+	return true;
+}
+
+// Syntax: "rompatch <address> <hex bytes>": replaces ROM bytes while the set
+// is enabled. Any ROM mirror (0x08000000-0x0DFFFFFF) is accepted.
+bool GBACheatAddROMPatchLine(struct GBACheatSet* cheats, const char* line) {
+	uint32_t address;
+	uint32_t size;
+	uint8_t* data;
+	if (!_parseDataLine(line, "rompatch", 2, &address, &size, &data)) {
+		return false;
+	}
+	uint32_t region = address >> BASE_OFFSET;
+	uint32_t offset = address & (GBA_SIZE_ROM0 - 1);
+	if (region < GBA_REGION_ROM0 || region > GBA_REGION_ROM2_EX || size > GBA_SIZE_ROM0 - offset) {
+		mLOG(CHEATS, ERROR, "rompatch 0x%08X+0x%X is outside the cartridge ROM", address, size);
+		free(data);
+		return false;
+	}
+	struct GBACheatData* entry = GBACheatDataListAppend(&cheats->romData);
+	memset(entry, 0, sizeof(*entry));
+	entry->address = GBA_BASE_ROM0 | offset;
+	entry->size = size;
+	entry->data = data;
+	return true;
+}
+
+static bool _dataDirty(const struct GBACheatDataList* list, bool wanted) {
+	size_t i;
+	for (i = 0; i < GBACheatDataListSize(list); ++i) {
+		if (GBACheatDataListGetConstPointer(list, i)->applied != wanted) {
+			return true;
+		}
+	}
+	return false;
+}
+
+struct _ROMPatchRef {
+	struct GBACheatSet* set;
+	struct GBACheatData* patch;
+};
+
+static int _newestFirst(const void* a, const void* b) {
+	const struct _ROMPatchRef* x = a;
+	const struct _ROMPatchRef* y = b;
+	if (x->patch->seq == y->patch->seq) {
+		return 0;
+	}
+	return x->patch->seq < y->patch->seq ? 1 : -1;
+}
+
+static size_t _collectApplied(struct GBACheatSet* set, struct _ROMPatchRef* refs, size_t n) {
+	size_t i;
+	for (i = 0; i < GBACheatDataListSize(&set->romData); ++i) {
+		struct GBACheatData* patch = GBACheatDataListGetPointer(&set->romData, i);
+		if (patch->applied) {
+			if (refs) {
+				refs[n].set = set;
+				refs[n].patch = patch;
+			}
+			++n;
+		}
+	}
+	return n;
+}
+
+// Takes every "rompatch" off, newest first, so the ROM is exactly as it was
+static void _revertAllROMPatches(struct mCheatDevice* device, struct GBACheatSet* removed) {
+	size_t nSets = mCheatSetsSize(&device->cheats);
+	size_t n = removed ? _collectApplied(removed, NULL, 0) : 0;
+	size_t s;
+	for (s = 0; s < nSets; ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		if (set != removed) {
+			n = _collectApplied(set, NULL, n);
+		}
+	}
+	if (!n) {
+		return;
+	}
+	struct _ROMPatchRef* refs = malloc(n * sizeof(*refs));
+	if (!refs) {
+		return;
+	}
+	n = removed ? _collectApplied(removed, refs, 0) : 0;
+	for (s = 0; s < nSets; ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		if (set != removed) {
+			n = _collectApplied(set, refs, n);
+		}
+	}
+	qsort(refs, n, sizeof(*refs), _newestFirst);
+	size_t i;
+	for (i = 0; i < n; ++i) {
+		_revertROMPatch(refs[i].set, refs[i].patch);
+	}
+	free(refs);
+}
+
+static void _applyAllROMPatches(struct mCheatDevice* device, struct GBA* gba) {
+	size_t s;
+	for (s = 0; s < mCheatSetsSize(&device->cheats); ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		if (!_active(set)) {
+			continue;
+		}
+		set->romTarget = gba;
+		set->romCrc = gba->romCrc32;
+		size_t i;
+		for (i = 0; i < GBACheatDataListSize(&set->romData); ++i) {
+			struct GBACheatData* patch = GBACheatDataListGetPointer(&set->romData, i);
+			// Without a ROM nothing is written, and nothing will be restored
+			patch->written = GBAMemoryPatchROM(gba, patch->address, patch->data, patch->size, &patch->data[patch->size]);
+			patch->applied = true;
+			patch->seq = ++_romPatchSeq;
+		}
+	}
+}
+
+static bool _dataInBlock(const struct GBACheatData* data, const struct GBACheatRAMBlock* block) {
+	uint32_t offset = data->address - block->base;
+	return offset < block->size && data->size <= block->size - offset;
+}
+
+// Rebuilds the reset image of every mapped block from the "allocdata" lines
+// of the enabled sets (in file order, later lines win) and puts the data in:
+// a block mapped just now gets the whole image; a block that was already
+// mapped only gets the lines that just came into effect; a block whose
+// contents came from a savestate keeps them.
+static void _loadAllocData(struct mCheatDevice* device, struct GBA* gba) {
+	size_t nSets = mCheatSetsSize(&device->cheats);
+	size_t b;
+	size_t s;
+	size_t i;
+	for (b = 0; b < GBA_CHEAT_RAM_MAX_BLOCKS; ++b) {
+		struct GBACheatRAMBlock* block = &gba->memory.cheatRam[b];
+		if (!block->data) {
+			continue;
+		}
+		uint8_t* image = NULL;
+		for (s = 0; s < nSets; ++s) {
+			struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+			if (!_active(set)) {
+				continue;
+			}
+			for (i = 0; i < GBACheatDataListSize(&set->allocData); ++i) {
+				const struct GBACheatData* data = GBACheatDataListGetConstPointer(&set->allocData, i);
+				if (!_dataInBlock(data, block)) {
+					continue;
+				}
+				if (!image) {
+					image = calloc(1, block->size);
+					if (!image) {
+						break;
+					}
+				}
+				memcpy(&image[data->address - block->base], data->data, data->size);
+			}
+		}
+		GBAMemorySetCheatRAMImage(gba, block, image);
+		if (block->restored) {
+			free(image);
+			continue;
+		}
+		if (block->fresh) {
+			if (image) {
+				GBAMemoryWriteCheatRAM(gba, block->base, image, block->size);
+			}
+			free(image);
+			continue;
+		}
+		free(image);
+		for (s = 0; s < nSets; ++s) {
+			struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+			if (!_active(set)) {
+				continue;
+			}
+			for (i = 0; i < GBACheatDataListSize(&set->allocData); ++i) {
+				const struct GBACheatData* data = GBACheatDataListGetConstPointer(&set->allocData, i);
+				if (!data->applied && _dataInBlock(data, block)) {
+					GBAMemoryWriteCheatRAM(gba, data->address, data->data, data->size);
+				}
+			}
+		}
+	}
+}
+
+static bool _cpuInBlock(struct GBA* gba, const struct GBACheatRAMBlock* block) {
+	// PC runs up to two instructions ahead of the one executing
+	return gba->cpu->gprs[ARM_PC] - block->base < block->size + 2 * WORD_SIZE_ARM;
+}
+
+// Makes cheat RAM and "rompatch" bytes match the enabled sets.
+// Order: ROM patches come off first, then unused blocks are unmapped (back to
+// open bus), new blocks are mapped and filled with their "allocdata", and
+// only then the ROM patches go back on, so a ROM hook never points into a
+// block that is missing or still empty. All of this runs between two CPU
+// instructions; a block the CPU is executing from right now stays mapped
+// until it has left it (checked again on every refresh).
+static void _sync(struct mCheatDevice* device, struct GBACheatSet* removed, bool full) {
 	if (!device->p || device->p->platform(device->p) != mPLATFORM_GBA) {
 		return;
 	}
 	struct GBA* gba = device->p->board;
+	size_t nSets = mCheatSetsSize(&device->cheats);
+	bool romDirty = false;
+	bool dataDirty = false;
+	if (removed) {
+		romDirty = _dataDirty(&removed->romData, false);
+		dataDirty = _dataDirty(&removed->allocData, false);
+	}
+	size_t s;
 	size_t i;
-	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+	for (s = 0; s < nSets; ++s) {
+		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+		romDirty = romDirty || _dataDirty(&set->romData, _active(set));
+		dataDirty = dataDirty || _dataDirty(&set->allocData, _active(set));
+	}
+
+	if (romDirty) {
+		_revertAllROMPatches(device, removed);
+	}
+
+	// Adding a set never makes a block unwanted. Skipping the unmap there also
+	// keeps blocks (and their savestate contents) alive while a cheat file is
+	// re-parsed set by set after mCheatDeviceClear, e.g. when a savestate
+	// carrying its cheats is loaded; leftovers go on the next refresh.
+	for (i = 0; full && i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
 		struct GBACheatRAMBlock* block = &gba->memory.cheatRam[i];
 		if (block->data && !_allocWanted(device, block->base, block->size)) {
+			if (_cpuInBlock(gba, block)) {
+				mLOG(CHEATS, DEBUG, "Cheat RAM 0x%08X is executing; unmapping it later", block->base);
+				continue;
+			}
 			GBAMemoryUnmapCheatRAM(gba, block->base, block->size);
 		}
 	}
-	size_t s;
-	for (s = 0; s < mCheatSetsSize(&device->cheats); ++s) {
+	for (s = 0; s < nSets; ++s) {
 		struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
-		if (!set->d.enabled) {
+		if (!_active(set)) {
 			continue;
 		}
 		for (i = 0; i < set->nAllocs; ++i) {
 			GBAMemoryMapCheatRAM(gba, set->allocs[i].base, set->allocs[i].size);
 		}
 	}
+	bool fresh = false;
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		if (gba->memory.cheatRam[i].data && gba->memory.cheatRam[i].fresh) {
+			fresh = true;
+		}
+	}
+	if (dataDirty || fresh) {
+		_loadAllocData(device, gba);
+		for (s = 0; s < nSets; ++s) {
+			struct GBACheatSet* set = (struct GBACheatSet*) *mCheatSetsGetPointer(&device->cheats, s);
+			for (i = 0; i < GBACheatDataListSize(&set->allocData); ++i) {
+				GBACheatDataListGetPointer(&set->allocData, i)->applied = _active(set);
+			}
+		}
+		if (removed) {
+			for (i = 0; i < GBACheatDataListSize(&removed->allocData); ++i) {
+				GBACheatDataListGetPointer(&removed->allocData, i)->applied = false;
+			}
+		}
+	}
+	// "restored" (contents from a savestate) lasts until the next refresh or
+	// removal, so sets re-added in between do not overwrite the state's data
+	for (i = 0; i < GBA_CHEAT_RAM_MAX_BLOCKS; ++i) {
+		gba->memory.cheatRam[i].fresh = false;
+		if (full) {
+			gba->memory.cheatRam[i].restored = false;
+		}
+	}
+
+	if (romDirty) {
+		_applyAllROMPatches(device, gba);
+	}
+}
+
+void GBACheatSyncAllocations(struct mCheatDevice* device) {
+	_sync(device, NULL, true);
 }
 
 static bool GBACheatAddAutodetect(struct GBACheatSet* set, uint32_t op1, uint32_t op2) {
@@ -310,7 +688,14 @@ bool GBACheatAddVBALine(struct GBACheatSet* cheats, const char* line) {
 
 bool GBACheatAddLine(struct mCheatSet* set, const char* line, int type) {
 	struct GBACheatSet* cheats = (struct GBACheatSet*) set;
-	if (strncasecmp(_skipSpace(line), "alloc", 5) == 0) {
+	const char* keyword = _skipSpace(line);
+	if (strncasecmp(keyword, "allocdata", 9) == 0) {
+		return GBACheatAddAllocDataLine(cheats, line);
+	}
+	if (strncasecmp(keyword, "rompatch", 8) == 0) {
+		return GBACheatAddROMPatchLine(cheats, line);
+	}
+	if (strncasecmp(keyword, "alloc", 5) == 0) {
 		return GBACheatAddAllocLine(cheats, line);
 	}
 	switch (type) {
@@ -363,9 +748,11 @@ static void GBACheatRefresh(struct mCheatSet* cheats, struct mCheatDevice* devic
 	if (cheats->enabled && gbaset->hook && !gbaset->hook->reentries) {
 		_addBreakpoint(device, gbaset);
 	}
-	// Once per frame (from the first set) is enough to follow enable/disable
-	if (mCheatSetsSize(&device->cheats) && *mCheatSetsGetPointer(&device->cheats, 0) == cheats) {
-		GBACheatSyncAllocations(device);
+	// Once per frame (from the first set) follows enable/disable of any set;
+	// a set whose own lines are not in effect as they should be syncs at once
+	if ((mCheatSetsSize(&device->cheats) && *mCheatSetsGetPointer(&device->cheats, 0) == cheats) ||
+	    _dataDirty(&gbaset->romData, _active(gbaset)) || _dataDirty(&gbaset->allocData, _active(gbaset))) {
+		_sync(device, NULL, true);
 	}
 }
 
