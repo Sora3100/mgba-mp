@@ -89,6 +89,8 @@ public:
 
 private:
 	mSDLPlayer* sdlPlayer(int player);
+	// Must be called with s_eventsRwLock held for writing
+	bool assignFreeGamepads();
 
 	ConfigController* m_config = nullptr;
 	InputController* m_controller;

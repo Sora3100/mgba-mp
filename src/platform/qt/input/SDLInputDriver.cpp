@@ -196,8 +196,24 @@ void SDLInputDriver::updateGamepads() {
 	if (!s_eventsRwLock.tryLockForWrite(0)) {
 		return;
 	}
+	// Remember who holds which pad (by instance id: the list may be reallocated)
+	auto padId = [this](int player) -> long long {
+		mSDLPlayer* sdl = sdlPlayer(player);
+		return sdl && sdl->joystick ? static_cast<long long>(sdl->joystick->id) : -1;
+	};
+	long long before[EXTRA_PLAYERS + 1];
+	for (int p = 1; p <= EXTRA_PLAYERS + 1; ++p) {
+		before[p - 1] = padId(p);
+	}
 	if (m_config) {
 		mSDLUpdateJoysticks(&s_sdlEvents, m_config->input());
+	}
+	assignFreeGamepads();
+	bool changed = false;
+	for (int p = 1; p <= EXTRA_PLAYERS + 1; ++p) {
+		if (padId(p) != before[p - 1]) {
+			changed = true;
+		}
 	}
 
 	QSet<size_t> knownGamepads;
@@ -222,11 +238,42 @@ void SDLInputDriver::updateGamepads() {
 		return a->m_index < b->m_index;
 	});
 	s_eventsRwLock.unlock();
+
+	if (changed) {
+		// Queued: listeners query the pads, which takes the lock again
+		InputController* controller = m_controller;
+		QMetaObject::invokeMethod(controller, [controller]() {
+			emit controller->playersChanged();
+		}, Qt::QueuedConnection);
+	}
 }
 #endif
 
 int SDLInputDriver::activeGamepadIndex() const {
-	return m_sdlPlayer.joystick ? m_sdlPlayer.joystick->index : 0;
+	if (!m_sdlPlayer.joystick) {
+		// Upstream falls back to the first pad. With extra players that pad
+		// may belong to player 2, which would then drive both players (and
+		// the settings page would steal it), so report "no pad" instead.
+		return m_extraEnabled ? -1 : 0;
+	}
+	return m_sdlPlayer.joystick->index;
+}
+
+bool SDLInputDriver::assignFreeGamepads() {
+	if (!m_extraEnabled) {
+		return false;
+	}
+	// Player 1 first, then players 2..8: pads nobody holds go to the lowest
+	// player without one, in SDL device order
+	mSDLPlayer* players[EXTRA_PLAYERS + 1];
+	size_t count = 0;
+	for (int p = 1; p <= EXTRA_PLAYERS + 1; ++p) {
+		mSDLPlayer* sdl = sdlPlayer(p);
+		if (sdl) {
+			players[count++] = sdl;
+		}
+	}
+	return mSDLAssignFreeJoysticks(&s_sdlEvents, players, count) > 0;
 }
 
 void SDLInputDriver::setActiveGamepad(int index) {
@@ -267,6 +314,7 @@ void SDLInputDriver::setExtraPlayersEnabled(bool enabled) {
 			m_extraAttached[i] = false;
 		}
 	}
+	assignFreeGamepads();
 }
 
 bool SDLInputDriver::extraPlayersEnabled() const {
@@ -383,6 +431,7 @@ void SDLInputDriver::setPlayerGamepad(int player, int index) {
 		}
 	}
 	target->joystick = joystick;
+	assignFreeGamepads();
 }
 
 void SDLInputDriver::bindPlayerDefaults(mInputMap* map) {
