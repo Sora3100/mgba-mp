@@ -9,14 +9,19 @@ default; with both toggles off (and no alloc cheats), mgba-mp behaves like upstr
 
 - **Up to 8 controllers.** Player 1 is the normal mGBA input (keyboard and the selected gamepad). Players 2-8 each
   get their own gamepad. Gamepads are assigned in plug-in order: the first pad plugged in after player 1's becomes
-  player 2, the next player 3, and so on. A pad plugged in later fills the lowest free player slot.
+  player 2, the next player 3, and so on. A pad plugged in later, or a pad nobody holds any more (for example
+  after a pad was moved to another player), goes to the lowest player without one. While multiple controllers
+  are on, player 1 without a pad of its own never borrows another player's pad.
 - **Automatic bindings.** For every player (player 1 included, also on top of a loaded controller profile),
   anything left unbound gets its default: every GBA button, with the d-pad on both the pad's d-pad and its left
   stick. A default button that is already used for something else is skipped. While extended buttons are on, unbound
   extended buttons (X, Y, ZL, ZR, L3, R3, Guide, Back) are filled the same way, also right when the toggle is
   switched on.
 - **Player selector.** The Controllers page of the settings has a "Controller:" box at the top that switches between
-  Player 1-8. Each entry shows which gamepad that player has. The selected player's bindings are edited with the usual
+  Player 1-8. Each entry shows which gamepad that player has. Below it, the gamepad box shows the selected player's
+  pad; picking another pad there gives it to that player and loads that player's bindings for it. Pads are numbered
+  (so identical pads can be told apart) and show which player holds them. Every box follows assignment changes and
+  hotplugging. The selected player's bindings are edited with the usual
   key editor.
 - **Extended buttons.** The host pad's X, Y, ZL/L2, ZR/R2, L3, R3, Guide/Home and Back buttons can be passed to the
   game for every player. They are never mixed into the normal GBA buttons; a game only sees them through the
